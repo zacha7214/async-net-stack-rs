@@ -1,5 +1,6 @@
 
-## Project Vision
+# Project Vision
+---
 **A 10 k‑LOC async TCP/IP stack that moves 10 Gbps of traffic on a single core with < 2 µs per‑packet latency, using true zero‑copy buffers.**
 ---
 
