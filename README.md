@@ -28,3 +28,9 @@
 |  Physical NIC (or Virtual)                     |
 +-------------------------------------------------+
 ```
+* **Zero‑copy** is achieved by **never cloning the payload**. A packet lives in a **reference‑counted buffer** (`Arc<[u8]>` or `bytes::Bytes`) that is handed from the driver → IP → TCP → application. The driver returns the buffer to the pool when the future resolves.
+
+* **Async I/O** is built on **Tokio’s `Poll`/`Waker`** model. The driver registers its Rx/Tx queues with a **`mio::Poll`** (or Tokio’s reactor) and wakes the corresponding future when a new packet arrives or a Tx slot opens.
+
+* **Performance tuning** knobs (MTU, NUMA, off‑load) are exposed as **runtime configuration** (env vars, CLI flags, or a tiny JSON/YAML file).
+---
