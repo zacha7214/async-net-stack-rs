@@ -1,0 +1,9 @@
+[package]
+name = "async-net-stack-rs"
+version = "0.1.0"
+edition = "2024"
+authors = ["Zach Allen", "zacha7214@gmail.com"]
+license = "MIT"
+repository = "https://github.com/zacha7214/async-net-stack-rs"
+
+[dependencies]
