@@ -6,4 +6,11 @@ authors = ["Zach Allen", "zacha7214@gmail.com"]
 license = "MIT"
 repository = "https://github.com/zacha7214/async-net-stack-rs"
 
+[features]
+default = ["tun"]
+tun = []
+bpf = []
+af_packet = []
+xdp = []
+
 [dependencies]
