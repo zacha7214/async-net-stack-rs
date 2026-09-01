@@ -65,6 +65,12 @@ impl FramePool {
     ///
     /// `frame_size` must be at least `size_of::<usize>()` because the free list
     /// stores its next-pointer inside free frames.
+    /// Performance:
+    /// 'new' is intended for use with the TUN backend, where the other Device backends such as,
+    /// XDP will use from_raw_parts with a mmap ptr. Because of this, only new allocates the packet
+    /// pool internally. Both methods of allocating incur the pool indicies list allocation on the heap,
+    /// but because it will fit completely inside L1 cache and is accessed often, the performance tradeoff,
+    /// supports this strategy instead of a single itrusive list allocation.
     pub(crate) fn new(num_frames: usize, frame_size: usize, alignment: usize) -> Self {
         assert!(num_frames > 0, "num_frames must be > 0");
 
@@ -260,6 +266,11 @@ impl FramePool {
         self.num_frames
     }
 
+    #[inline]
+    pub fn owns_memory(&self) -> bool {
+        self.owns_memory
+    }
+
     /// Per-frame capacity in bytes.
     #[inline]
     pub fn frame_size(&self) -> usize {
@@ -292,10 +303,10 @@ impl FramePool {
 impl fmt::Debug for FramePool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FramePool")
-            .field("num_frames", &self.num_frames)
-            .field("frame_size", &self.frame_size)
+            .field("num_frames", &self.num_frames())
+            .field("frame_size", &self.frame_size())
             .field("total_bytes", &self.total_bytes())
-            .field("owns_memory", &self.owns_memory)
+            .field("owns_memory", &self.owns_memory())
             .finish()
     }
 }
