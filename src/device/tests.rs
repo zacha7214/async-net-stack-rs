@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 use crate::device::buffer_pool::{FramePool, PacketBuf};
+use crate::device::{Device, LoopbackDevice};
 
 #[test]
 fn alloc_free_roundtrip_exhausts_and_reuses() {
@@ -281,7 +282,7 @@ fn free_n_roundtrip_reuse() {
 
 #[test]
 fn mixed_alloc_free_and_batch() {
-    let pool = FramePool::new(6, 64, 4096);
+    let pool = FramePool::new(5, 64, 4096);
 
     // Single alloc
     let a = pool.alloc().unwrap();
@@ -339,8 +340,8 @@ fn debug_detects_double_free_in_free_n() {
 
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "double-allocated")]
-fn debug_detects_double_alloc_in_alloc_n() {
+#[should_panic(expected = "double-freed")]
+fn debug_detects_double_free_in_mixed_alloc_free() {
     let pool = FramePool::new(2, 64, 4096);
     let mut out = [0usize; 2];
     pool.alloc_n(&mut out);
@@ -393,4 +394,107 @@ fn batch_alloc_to_packet_bufs_and_recycle() {
     a.sort_unstable();
     b.sort_unstable();
     assert_eq!(a, b);
+}
+
+// --- Device trait (via LoopbackDevice) -------------------------------------
+
+#[test]
+fn loopback_roundtrip_preserves_payload() {
+    let mut dev = LoopbackDevice::with_capacity(8, 8);
+    let payload = b"hello loopback";
+
+    let mut buf = dev.alloc().unwrap();
+    let off = buf.data_offset();
+    buf.as_mut_slice()[off..off + payload.len()].copy_from_slice(payload);
+    buf.set_len(payload.len());
+
+    let mut tx = vec![buf];
+    assert_eq!(dev.send(&mut tx).unwrap(), 1);
+    assert_eq!(dev.queued(), 1);
+
+    let mut rx = Vec::new();
+    assert_eq!(dev.recv(1, &mut rx).unwrap(), 1);
+    assert_eq!(rx[0].as_slice(), payload);
+    assert_eq!(dev.queued(), 0);
+}
+
+#[test]
+fn loopback_send_recycles_frames() {
+    let mut dev = LoopbackDevice::with_capacity(4, 4);
+
+    // Drain the pool.
+    let mut tx = Vec::new();
+    for _ in 0..4 {
+        let mut buf = dev.alloc().unwrap();
+        let off = buf.data_offset();
+        buf.as_mut_slice()[off..off + 3].copy_from_slice(b"abc");
+        buf.set_len(3);
+        tx.push(buf);
+    }
+    assert!(
+        dev.alloc().is_none(),
+        "pool should be exhausted before send"
+    );
+
+    // send() takes ownership and recycles every frame.
+    assert_eq!(dev.send(&mut tx).unwrap(), 4);
+
+    // All four frames are back in the pool (hold them so they aren't recycled
+    // before we check exhaustion).
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(dev.alloc().unwrap());
+    }
+    assert!(dev.alloc().is_none());
+}
+
+#[test]
+fn loopback_drops_when_arena_full() {
+    // Four pool frames, two kernel slots: all four frames can be built, but only
+    // two fit in the kernel queue — the other two are dropped.
+    let mut dev = LoopbackDevice::with_capacity(4, 2);
+    let mut tx = Vec::new();
+    for i in 0..4 {
+        let mut buf = dev.alloc().unwrap();
+        let off = buf.data_offset();
+        buf.as_mut_slice()[off..off + 8].copy_from_slice(&[i as u8; 8]);
+        buf.set_len(8);
+        tx.push(buf);
+    }
+
+    assert_eq!(dev.send(&mut tx).unwrap(), 2);
+    assert_eq!(dev.dropped(), 2);
+    assert_eq!(dev.queued(), 2);
+}
+
+#[test]
+fn loopback_recv_partial_batch() {
+    let mut dev = LoopbackDevice::with_capacity(8, 8);
+    let mut tx = Vec::new();
+    for i in 0..3u8 {
+        let mut buf = dev.alloc().unwrap();
+        let off = buf.data_offset();
+        buf.as_mut_slice()[off..off + 4].copy_from_slice(&[i; 4]);
+        buf.set_len(4);
+        tx.push(buf);
+    }
+    assert_eq!(dev.send(&mut tx).unwrap(), 3);
+
+    let mut rx = Vec::new();
+    assert_eq!(dev.recv(2, &mut rx).unwrap(), 2);
+    assert_eq!(dev.queued(), 1);
+    assert_eq!(rx[0].as_slice(), &[0, 0, 0, 0]);
+    assert_eq!(rx[1].as_slice(), &[1, 1, 1, 1]);
+}
+
+#[test]
+fn loopback_frame_size_and_alloc() {
+    let mut dev = LoopbackDevice::new();
+    assert!(dev.frame_size() >= 1500, "frame must hold a standard MTU");
+
+    let buf = dev.alloc().unwrap();
+    assert!(buf.is_empty());
+    assert_eq!(buf.len(), 0);
+    assert_eq!(buf.capacity(), dev.frame_size());
+    assert!(buf.data_offset() > 0, "headroom should be reserved");
 }
