@@ -3,14 +3,14 @@
 ---
 **A WIP async TCP/IP stack that aims to move 10 Gbps of traffic on a single core with < 2 µs per‑packet latency, using true zero‑copy buffers.**
 
-A secondary goal, is to reach line rate with non zero copy workloads on home networks (any NIC), and identify via the resulting benchmarks which existing linux kernel drivers can support zero-copy, but have not been backported. In those cases, if I believe the evidence shows that doing so could helpful, I plan to use the data (and lessons) learned from completing this project to implement zero copy in those drivers myself.
+A secondary goal, is to reach line rate with non zero copy workloads on home networks (any NIC), and identify which existing linux kernel drivers can support zero-copy, but have not been backported. In those cases, if I believe the evidence shows that doing so could helpful, I plan to use the data obtained from this project to implement zero copy in those drivers myself.
 # Phase 1
 ---
 **Setup Buffer Pool that will pre-allocate the packet pool + indices list for TAP devices, or provide an mmap ptr for zero-copy backends.
 Set up tap device with benchmarks and samples to establish a baseline for which future devices can be tested against.
 # Phase 2
 ---
-Setup XDP backend on linux, /dev/bpf on macOS.
+Setup XDP backend on linux, /dev/bpf telemetry on macOS.
 
 # Phase 3
 ---
