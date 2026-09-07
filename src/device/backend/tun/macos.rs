@@ -156,6 +156,13 @@ impl UtunDevice {
     }
 }
 
+impl AsRawFd for UtunDevice {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
 /// Read a utun datagram and strip the 4-byte address-family prefix, so the
 /// caller sees a clean IP packet. The family bytes stay in the frame's headroom
 /// (immediately before the payload) where the send path can re-expose them.

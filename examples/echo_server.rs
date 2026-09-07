@@ -7,7 +7,7 @@
 //!   sudo ifconfig utun1 10.0.0.1 10.0.0.2 up
 //!
 //! Linux (after starting, use the printed name, e.g. `tun0`):
-//!   sudo ip addr add 10.0.0.1/24 dev tun0 && sudo ip link set tun0 up
+//!   sudo ipaddr add 10.0.0.1/24 dev tun0 && sudo ip link set tun0 up
 //!
 //! Every IP datagram received is sent straight back; throughput is printed once
 //! per second.

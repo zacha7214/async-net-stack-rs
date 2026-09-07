@@ -451,6 +451,18 @@ impl PacketBuf {
         (idx, len)
     }
 
+    /// Disarm `Drop` **in place** without returning the frame to the pool.
+    ///
+    /// Used by backends that move a frame onto an in-flight queue (e.g. an
+    /// AF_XDP TX ring) while the caller still holds the slot: after the
+    /// backend has taken ownership via [`PacketBuf::into_parts`] on a copy,
+    /// this makes the caller's later `clear()`/drop of the stale slot a
+    /// no-op — the same idempotency contract as `recycle_frames`.
+    #[inline]
+    pub(crate) fn disarm(&mut self) {
+        self.pool = std::ptr::null();
+    }
+
     /// Raw pointer to the valid bytes (for `write(2)`-style backends).
     ///
     /// Only the Linux TAP backend uses this today, so it reads as dead code on
