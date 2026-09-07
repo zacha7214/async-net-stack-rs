@@ -3,11 +3,21 @@ pub(crate) mod buffer_pool;
 mod loopback;
 #[cfg(test)]
 mod tests;
+#[cfg(all(feature = "tun", target_os = "macos"))]
+mod tun_reactor;
 
 pub use backend::DefaultDevice;
 pub use backend::Error;
 pub use buffer_pool::PacketBuf;
 pub use loopback::LoopbackDevice;
+#[cfg(all(feature = "tun", target_os = "macos"))]
+pub use tun_reactor::UtunReactor;
+#[cfg(all(feature = "xdp", target_os = "linux"))]
+pub use backend::af_xdp::{AttachMode, UMem, XdpConfig, XdpDevice, XskSocket, XdpStatistics};
+#[cfg(all(feature = "xdp", target_os = "linux"))]
+pub use backend::af_xdp::sys::{
+    XDP_COPY, XDP_SHARED_UMEM, XDP_UMEM_UNALIGNED_CHUNK_FLAG, XDP_USE_NEED_WAKEUP, XDP_ZEROCOPY,
+};
 
 /// A network device backend (TUN, AF_XDP, …).
 ///

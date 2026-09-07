@@ -123,7 +123,7 @@ fn packet_buf_with_headroom() {
         let headroom = buf.data_offset();
         assert!(headroom > 0);
         assert_eq!(buf.len(), 0);
-        assert_eq!(buf.as_slice(), &[]);
+        assert_eq!(buf.as_slice(), &[] as &[u8]);
 
         // Write payload into the middle of the frame.
         let payload = b"hello zero-copy";

@@ -1,7 +1,7 @@
 [package]
 name = "async-net-stack-rs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["Zach Allen", "zacha7214@gmail.com"]
 license = "MIT"
 repository = "https://github.com/zacha7214/async-net-stack-rs"
@@ -9,7 +9,6 @@ repository = "https://github.com/zacha7214/async-net-stack-rs"
 [features]
 default = ["tun"]
 tun = []
-bpf = []
 af_packet = []
 xdp = []
 
@@ -19,7 +18,22 @@ thiserror = "2.0.20"
 
 [dev-dependencies]
 criterion = "0.5"
+# cargo 1.75 (the Linux VM toolchain) cannot parse edition-2024 manifests.
+# criterion -> clap -> clap_lex resolved to edition-2024 releases, so pin
+# the newest edition-2021 versions (clap 4.6.0+/clap_lex 1.1.0 are 2024).
+clap = "=4.5.41"
+clap_lex = "=1.0.0"
+# criterion -> rayon: newest releases need rustc >= 1.80; pin to the
+# versions whose MSRV covers the VM toolchain (1.75).
+rayon = "=1.10.0"
+rayon-core = "=1.12.1"
+# criterion -> plotters -> half: half >= 2.5.0 needs rustc 1.81.
+half = "=2.4.1"
 
 [[bench]]
 name = "throughput"
 harness = false
+
+[[example]]
+name = "xdp_probe"
+required-features = ["xdp"]

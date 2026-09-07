@@ -7,7 +7,7 @@
 use std::ffi::CStr;
 use std::io;
 use std::mem::zeroed;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use crate::device::Device;
 use crate::device::backend::Error;
@@ -114,6 +114,13 @@ impl TunDevice {
         }
         // SAFETY: kernel filled `ifru_mtu` on success.
         Ok(unsafe { ifr.ifr_ifru.ifru_mtu } as usize)
+    }
+}
+
+impl AsRawFd for TunDevice {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 }
 
