@@ -53,7 +53,7 @@ Record the QEMU build, guest kernel commit, DMA descriptor address/length, UMEM
 chunk/offset and completion sequence. Compare forced copy and strict zero-copy
 with the existing `device_bench`; require its reported `zero_copy` value to agree.
 
-## The design I would build for speed
+## Designs that may work when optimizing for speed
 
 This path now has experimental code and a
 [step-by-step QEMU 11.0.1 lab](vhost-user-lab.md): the `vhost_user_net` host backend,
