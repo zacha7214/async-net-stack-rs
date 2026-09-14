@@ -1,8 +1,8 @@
 # async-net-stack-rs
 
 A small, single-core Rust networking stack for learning and measuring Linux
-AF_XDP and copying backends. The long-term target is 10 Gb/s on one core;
-**that is a goal, not a measured hardware result**.
+AF_XDP and copying backends, with a longer term goal being research into kernel internals related to os support for zero copy, 
+and what might be possible for emulating network optimizations on hardware that does not support it directly.
 
 The device backends use handwritten libc/kernel interfaces. Packet handles
 own their arena through a non-atomic reference count, so they can safely outlive
