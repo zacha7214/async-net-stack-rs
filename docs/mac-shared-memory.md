@@ -95,7 +95,7 @@ reset and outstanding operations. Validate direction, lengths, chained ranges,
 overlaps and indices before using any guest-supplied address. A private benchmark
 with a trusted peer is substantially simpler than this device boundary.
 
-### The virtio DMA requirement is a real integration step
+### Virtio DMA Integration
 
 The [current virtio-net driver](https://github.com/torvalds/linux/blob/master/drivers/net/virtio_net.c)
 checks XSK headroom, receive-pool state and matching non-null RX/TX DMA devices
@@ -116,7 +116,7 @@ advertise it and treat IOVAs as GPAs, or remove the driver's checks to make a bi
 succeed. Begin with ordinary virtio/copy operation, then establish the DMA mapping
 and queue-reset requirements before calling the result zero-copy.
 
-### An especially useful Mac extension: vmnet scatter/gather
+### Mac extension: vmnet scatter/gather
 
 [vmnet_read](https://developer.apple.com/documentation/vmnet/vmnet_read(_:_:_:))
 accepts an array of packet descriptions with caller-provided iovecs. The proposed
