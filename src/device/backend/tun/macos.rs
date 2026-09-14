@@ -3,23 +3,21 @@
 //! A `utun` device is a kernel-control socket (`PF_SYSTEM` / `SOCK_DGRAM` /
 //! `SYSPROTO_CONTROL`) bound to the `com.apple.net.utun_control` controller. It
 //! carries raw IP packets prefixed with a 4-byte address-family header
-//! (`AF_INET`/`AF_INET6`, host byte order). This backend strips that prefix on
+//! (`AF_INET`/`AF_INET6`, network byte order). This backend strips that prefix on
 //! receive and re-derives it on send, so callers see plain IP packets exactly
 //! like the Linux `IFF_TUN | IFF_NO_PI` backend.
 
-use std::ffi::{CStr, c_char, c_uchar, c_void};
+use std::ffi::{c_char, c_uchar, c_void, CStr};
 use std::io;
-use std::mem::{size_of, zeroed};
+use std::mem::{size_of, size_of_val, zeroed};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-use crate::device::Device;
 use crate::device::backend::Error;
 use crate::device::buffer_pool::{FramePool, PacketBuf};
 use crate::device::recycle_frames;
+use crate::device::Device;
 
-use super::{
-    DEFAULT_MTU, frame_size_for_mtu, read_datagram, set_ifname, set_nonblocking, write_datagram,
-};
+use super::{frame_size_for_mtu, read_datagram, set_ifname, set_nonblocking, DEFAULT_MTU};
 
 /// Kernel-control name for utun devices.
 const CTRL_NAME: &str = "com.apple.net.utun_control";
@@ -62,6 +60,13 @@ impl UtunDevice {
     /// Requires elevated privileges; the kernel rejects the `connect` with
     /// `EPERM`/`EACCES` otherwise.
     pub fn new_with_mtu(unit: u32, mtu: usize) -> Result<Self, Error> {
+        if !(68..=65535).contains(&mtu) {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MTU must be 68..=65535",
+            )));
+        }
+
         let fd = unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
         if fd < 0 {
             return Err(Error::CreateSocket(io::Error::last_os_error()));
@@ -199,12 +204,35 @@ fn family_for(buf: &PacketBuf) -> io::Result<u32> {
     }
 }
 
-/// Prepend the 4-byte address-family prefix utun requires, then write the
-/// datagram.
-fn write_packet(fd: RawFd, buf: &mut PacketBuf) -> io::Result<()> {
-    let family = family_for(buf)?;
-    buf.push_header(&family.to_ne_bytes());
-    write_datagram(fd, buf)
+/// Scatter/gather writes avoid mutating packet headroom and work for RX
+/// buffers, freshly allocated packets, and retries after EAGAIN alike.
+fn write_packet(fd: RawFd, buf: &PacketBuf) -> io::Result<()> {
+    let family = family_for(buf)?.to_be_bytes();
+    let data = buf.as_slice();
+    let iov = [
+        libc::iovec {
+            iov_base: family.as_ptr() as *mut c_void,
+            iov_len: family.len(),
+        },
+        libc::iovec {
+            iov_base: data.as_ptr() as *mut c_void,
+            iov_len: data.len(),
+        },
+    ];
+    loop {
+        let n = unsafe { libc::writev(fd, iov.as_ptr(), 2) };
+        if n >= 0 {
+            return if n as usize == data.len() + 4 {
+                Ok(())
+            } else {
+                Err(io::Error::new(io::ErrorKind::WriteZero, "short utun write"))
+            };
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
 }
 
 impl Device for UtunDevice {
@@ -243,18 +271,25 @@ impl Device for UtunDevice {
             }
         }
 
-        // The device has taken ownership of the whole slice; recycle every frame.
-        recycle_frames(frames);
+        // Preserve unsent frames for retry after backpressure.
+        recycle_frames(&mut frames[..sent]);
 
+        if sent > 0 {
+            return Ok(sent);
+        }
         match err {
             Some(e) => Err(e),
-            None => Ok(sent),
+            None => Ok(0),
         }
     }
 
     fn alloc(&mut self) -> Option<PacketBuf> {
         let idx = self.pool.alloc()?;
         Some(self.pool.packet_buf(idx, 0))
+    }
+
+    fn alloc_batch(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
+        self.pool.alloc_batch(max, out)
     }
 
     fn frame_size(&self) -> usize {
@@ -280,5 +315,27 @@ mod tests {
 
         buf.as_mut_slice()[off] = 0x60; // IPv6: version nibble = 6
         assert_eq!(family_for(&buf).unwrap(), libc::AF_INET6 as u32);
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+    #[test]
+    fn family_prefix_is_network_order_and_headroom_is_unchanged() {
+        let (sender, receiver) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let pool = FramePool::new(1, 256, 4096);
+        let mut buf = pool.packet_buf(pool.alloc().unwrap(), 0);
+        buf.set_headroom(0);
+        buf.set_len(20);
+        buf.as_mut_packet().fill(0);
+        buf.as_mut_packet()[0] = 0x45;
+        write_packet(sender.as_raw_fd(), &buf).unwrap();
+        let mut data = [0; 32];
+        assert_eq!(receiver.recv(&mut data).unwrap(), 24);
+        assert_eq!(&data[..4], &(libc::AF_INET as u32).to_be_bytes());
+        assert_eq!(&data[4..24], buf.as_slice());
+        assert_eq!(buf.data_offset(), 0);
+        assert_eq!(buf.len(), 20);
     }
 }

@@ -1,503 +1,337 @@
-//! Zero-copy frame pool and packet buffer handles.
-//!
-//! This is the shared memory substrate that every [`crate::Device`] backend is
-//! built on:
-//!
-//! * A **copying** backend (TAP) `read()`s frames straight into pool frames and
-//!   `write()`s them back out.
-//! * A **zero-copy** backend (AF_XDP) hands the very same frames to the NIC so
-//!   that DMA lands in pool memory directly — no copies.
-//!
-//! In both cases the application sees identical [`PacketBuf`] handles, so the
-//! only thing that changes when you swap backends is that the copies vanish.
-//!
-//! # Ownership model
-//!
-//! A [`FramePool`] owns a single, fixed-size arena of `num_frames` frames of
-//! `frame_size` bytes each. Frames are handed out one at a time and are
-//! *exactly* one of:
-//!
-//! 1. **free** — on the free list, owned by the pool;
-//! 2. **live** — owned by exactly one [`PacketBuf`];
-//! 3. **in flight** — owned by the device (e.g. queued by a loopback device,
-//!    or handed to the kernel by a NIC backend).
-//!
-//! A [`PacketBuf`] automatically returns its frame to the free list when it is
-//! dropped (`Vec::clear`, scope exit, …), or explicitly via
-//! [`PacketBuf::recycle`].
-
+//! Fixed arenas with exclusive packet handles. A non-atomic `Rc` keeps the
+//! arena and free list alive across device moves and outstanding packets.
 use std::alloc::{self, Layout};
-use std::cell::{Cell, RefCell};
+use std::any::Any;
+use std::cell::Cell;
 use std::fmt;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
-/// A pre allocated arena of fixed-size frames.
-///
-/// Not `Send` / `Sync`: it is a single-core by design.
-pub struct FramePool {
-    /// Base of the arena
+#[derive(Clone)]
+pub(crate) struct FramePool(Rc<PoolInner>);
+
+struct PoolInner {
     ptr: NonNull<u8>,
-    /// Total arena size in bytes
-    total: usize,
-    /// Stride between frames in bytes.
     frame_size: usize,
-    /// total frame count
     num_frames: usize,
-    /// alignment the arena was allocated with (for 'dealloc')
-    layout: Layout,
-    /// Whether this pool owns (and must free) `ptr`. `false` when constructed
-    /// around externally managed memory (e.g. an AF_XDP UMEM mmap).
-    owns_memory: bool,
-    /// Owns the free-list memory.
-    _free_list: Box<[usize]>,
-    /// Cached pointer to `free_list` data. Stable across moves because
-    /// the Box heap allocation doesn't relocate.
-    free_list_ptr: *mut usize,
-    /// Stack depth. The only mutable state; Cell gives us &self access.
+    layout: Option<Layout>,
+    // Keeps an externally mapped arena alive, independently of its socket.
+    _owner: Option<Rc<dyn Any>>,
+    // Cell permits mutation through shared pool handles without aliasing &mut.
+    free_list: Box<[Cell<usize>]>,
     free_count: Cell<usize>,
     #[cfg(debug_assertions)]
-    in_use: std::cell::RefCell<Vec<u8>>,
+    in_use: Box<[Cell<bool>]>,
 }
 
 impl FramePool {
-    /// Allocate a pool of `num_frames` frames of `frame_size` bytes each,
-    /// aligned to `alignment` bytes.
-    ///
-    /// `frame_size` must be at least `size_of::<usize>()` because the free list
-    /// stores its next-pointer inside free frames.
-    /// Performance:
-    /// 'new' is intended for use with the TUN backend, where the other Device backends such as,
-    /// XDP will use from_raw_parts with a mmap ptr. Because of this, only new allocates the packet
-    /// pool internally. Both methods of allocating incur the pool indicies list allocation on the heap,
-    /// but because it will fit completely inside L1 cache and is accessed often, the performance tradeoff,
-    /// supports this strategy instead of a single itrusive list allocation.
     pub(crate) fn new(num_frames: usize, frame_size: usize, alignment: usize) -> Self {
-        assert!(num_frames > 0, "num_frames must be > 0");
-
-        assert!(
-            frame_size >= std::mem::size_of::<usize>(),
-            "frame_size must be at least {} bytes (intrusive free list)",
-            std::mem::size_of::<usize>()
-        );
-
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
-
-        assert!(
-            alignment >= std::mem::align_of::<usize>(),
-            "alignment must be at least {}",
-            std::mem::align_of::<usize>()
-        );
-
+        assert!(num_frames > 0 && frame_size > 0);
         let total = num_frames
             .checked_mul(frame_size)
             .expect("arena size overflow");
-
         let layout = Layout::from_size_align(total, alignment).expect("invalid layout");
+        // Safe slice access may expose any byte, including unused capacity.
+        // Zero once on construction; no per-packet clearing is necessary.
+        let ptr = unsafe { alloc::alloc_zeroed(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| alloc::handle_alloc_error(layout));
+        Self::build(ptr, frame_size, num_frames, Some(layout), None)
+    }
 
-        // SAFETY: `layout` has non-zero size (num_frames > 0, frame_size >= 8).
-        let ptr = unsafe { alloc::alloc(layout) };
-        let Some(ptr) = NonNull::new(ptr) else {
-            alloc::handle_alloc_error(layout);
-        };
-
-        let mut indices = Vec::with_capacity(num_frames);
-        for i in (0..num_frames).rev() {
-            indices.push(i);
-        }
-        let mut free_list = indices.into_boxed_slice();
-
-        // Heap data pointer — stable for the lifetime of the Box.
-        let free_list_ptr = (&mut *free_list).as_mut_ptr();
-
-        let pool = Self {
+    fn build(
+        ptr: NonNull<u8>,
+        frame_size: usize,
+        num_frames: usize,
+        layout: Option<Layout>,
+        owner: Option<Rc<dyn Any>>,
+    ) -> Self {
+        Self(Rc::new(PoolInner {
             ptr,
-            total,
             frame_size,
             num_frames,
             layout,
-            owns_memory: true,
-            _free_list: free_list,
-            free_list_ptr,
+            _owner: owner,
+            free_list: (0..num_frames).rev().map(Cell::new).collect(),
             free_count: Cell::new(num_frames),
             #[cfg(debug_assertions)]
-            in_use: RefCell::new(vec![0u8; num_frames.div_ceil(8)]),
-        };
-
-        pool
+            in_use: (0..num_frames).map(|_| Cell::new(false)).collect(),
+        }))
     }
 
-    pub(crate) fn alloc(&self) -> Option<usize> {
-        let count = self.free_count.get();
-        if count == 0 {
-            return None;
-        }
-        self.free_count.set(count - 1);
-        // SAFETY: single-threaded, count-1 is in bounds.
-        let idx = unsafe { *self.free_list_ptr.add(count - 1) };
-        #[cfg(debug_assertions)]
-        self.mark_used(idx, true);
-        Some(idx)
-    }
-
-    pub(crate) fn free(&self, idx: usize) {
-        #[cfg(debug_assertions)]
-        self.mark_used(idx, false);
-        let count = self.free_count.get();
-        debug_assert!(count < self.num_frames, "free list overflow");
-        // SAFETY: single-threaded, count is in bounds.
-        unsafe {
-            *self.free_list_ptr.add(count) = idx;
-        }
-        self.free_count.set(count + 1);
-    }
-
-    pub fn alloc_n(&self, out: &mut [usize]) -> usize {
-        let count = self.free_count.get();
-        let n = out.len().min(count);
-        // SAFETY: non-overlapping, both pointers valid.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.free_list_ptr.add(count - n), out.as_mut_ptr(), n);
-        }
-        #[cfg(debug_assertions)]
-        for i in 0..n {
-            self.mark_used(out[i], true);
-        }
-        self.free_count.set(count - n);
-        n
-    }
-
-    pub(crate) fn free_n(&self, indices: &[usize]) {
-        #[cfg(debug_assertions)]
-        for &idx in indices {
-            self.mark_used(idx, false);
-        }
-        let count = self.free_count.get();
-        let n = indices.len();
-        debug_assert!(count + n <= self.num_frames, "free list overflow");
-        // SAFETY: non-overlapping, both pointers valid.
-        unsafe {
-            std::ptr::copy_nonoverlapping(indices.as_ptr(), self.free_list_ptr.add(count), n);
-        }
-        self.free_count.set(count + n);
-    }
-
-    pub fn packet_buf(&self, idx: usize, len: usize) -> PacketBuf {
-        debug_assert!(idx < self.num_frames);
-        debug_assert!(len <= self.frame_size);
-
-        // Reserve 128 bytes of headroom by default, or 1/4 of frame, whichever fits.
-        let data_offset = (self.frame_size / 4).min(128).min(self.frame_size - len);
-
-        PacketBuf {
-            ptr: NonNull::new(self.frame_ptr(idx)).expect("non-null arena pointer"),
-            capacity: self.frame_size,
-            len,
-            idx,
-            _data_offset: data_offset,
-            pool: self as *const FramePool,
-        }
-    }
-
-    #[inline]
-    fn frame_ptr(&self, idx: usize) -> *mut u8 {
-        // SAFETY: base + idx*stride is within the arena by construction.
-        unsafe { self.ptr.as_ptr().add(idx * self.frame_size) }
-    }
-
-    /// Wrap caller-provided memory as a frame pool.
-    ///
-    /// The pool does **not** own or free `ptr`; the caller must keep it alive
-    /// and unaliased for the pool's lifetime. This is the hook an AF_XDP backend
-    /// uses to point the pool at its UMEM mmap.
-    ///
     /// # Safety
-    /// `ptr` must be valid for reads and writes of `total` bytes and must not be
-    /// aliased anywhere else. `num_frames * frame_size` must be `<= total`, and
-    /// `frame_size >= size_of::<usize>()`.
-    #[allow(dead_code)] // used by the future AF_XDP backend
+    /// The initialized arena must remain valid and exclusively managed by this
+    /// pool until ALL its packet handles have dropped, not just the device.
+    #[cfg(test)]
     pub(crate) unsafe fn from_raw_parts(
         ptr: *mut u8,
         total: usize,
         frame_size: usize,
         num_frames: usize,
     ) -> Self {
-        assert!(num_frames > 0, "num_frames must be > 0");
+        Self::from_region(ptr, total, frame_size, num_frames, None)
+    }
 
-        assert!(
-            frame_size >= std::mem::size_of::<usize>(),
-            "frame_size must be at least {} bytes",
-            std::mem::size_of::<usize>()
-        );
+    /// # Safety
+    /// `owner` must keep this initialized mapping valid; only this pool and
+    /// kernel-owned frames may access it. Each live frame has a single owner.
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    pub(crate) unsafe fn from_owned_region(
+        ptr: *mut u8,
+        total: usize,
+        frame_size: usize,
+        num_frames: usize,
+        owner: Rc<dyn Any>,
+    ) -> Self {
+        Self::from_region(ptr, total, frame_size, num_frames, Some(owner))
+    }
 
-        assert!(num_frames * frame_size <= total, "arena too small");
-        let Some(ptr) = NonNull::new(ptr) else {
-            panic!("null arena pointer");
-        };
-
-        // Build the free list stack exactly as in `new`
-        let mut indices = Vec::with_capacity(num_frames);
-        for i in (0..num_frames).rev() {
-            indices.push(i);
-        }
-
-        let mut free_list = indices.into_boxed_slice();
-        let free_list_ptr = (&mut *free_list).as_mut_ptr();
-        Self {
-            ptr,
-            total,
+    #[cfg(any(test, all(feature = "xdp", target_os = "linux")))]
+    unsafe fn from_region(
+        ptr: *mut u8,
+        total: usize,
+        frame_size: usize,
+        num_frames: usize,
+        owner: Option<Rc<dyn Any>>,
+    ) -> Self {
+        assert!(num_frames > 0 && frame_size > 0);
+        assert!(num_frames.checked_mul(frame_size).expect("arena overflow") <= total);
+        Self::build(
+            NonNull::new(ptr).expect("null arena"),
             frame_size,
             num_frames,
-            layout: Layout::from_size_align(1, 1).unwrap(),
-            owns_memory: false,
-            _free_list: free_list,
-            free_list_ptr,
-            free_count: Cell::new(num_frames), // all frames start free
+            None,
+            owner,
+        )
+    }
+
+    #[inline]
+    pub(crate) fn alloc(&self) -> Option<usize> {
+        let count = self.available();
+        if count == 0 {
+            return None;
+        }
+        let idx = self.0.free_list[count - 1].get();
+        self.0.free_count.set(count - 1);
+        #[cfg(debug_assertions)]
+        self.mark_used(idx, true);
+        Some(idx)
+    }
+
+    #[inline]
+    pub(crate) fn free(&self, idx: usize) {
+        #[cfg(debug_assertions)]
+        self.mark_used(idx, false);
+        let count = self.available();
+        self.0.free_list[count].set(idx);
+        self.0.free_count.set(count + 1);
+    }
+
+    pub(crate) fn alloc_n(&self, out: &mut [usize]) -> usize {
+        let count = self.available();
+        let n = out.len().min(count);
+        for (dst, src) in out[..n].iter_mut().zip(&self.0.free_list[count - n..count]) {
+            *dst = src.get();
             #[cfg(debug_assertions)]
-            in_use: RefCell::new(vec![0u8; num_frames.div_ceil(8)]),
+            self.mark_used(*dst, true);
+        }
+        self.0.free_count.set(count - n);
+        n
+    }
+
+    #[cfg(any(test, all(feature = "xdp", target_os = "linux")))]
+    pub(crate) fn free_n(&self, indices: &[usize]) {
+        let count = self.available();
+        #[cfg(debug_assertions)]
+        for &idx in indices {
+            self.mark_used(idx, false);
+        }
+        for (&idx, dst) in indices
+            .iter()
+            .zip(&self.0.free_list[count..count + indices.len()])
+        {
+            dst.set(idx);
+        }
+        self.0.free_count.set(count + indices.len());
+    }
+
+    /// Internal ownership transfer: idx must be allocated and have no handle.
+    pub(crate) fn packet_buf(&self, idx: usize, len: usize) -> PacketBuf {
+        assert!(idx < self.num_frames() && len <= self.frame_size());
+        PacketBuf {
+            ptr: unsafe {
+                NonNull::new_unchecked(self.0.ptr.as_ptr().add(idx * self.frame_size()))
+            },
+            data_offset: (self.frame_size() / 4)
+                .min(128)
+                .min(self.frame_size() - len),
+            capacity: self.frame_size(),
+            len,
+            idx,
+            pool: Some(self.clone()),
         }
     }
 
-    /// Number of frames in the pool.
-    #[inline]
-    pub fn num_frames(&self) -> usize {
-        self.num_frames
+    pub(crate) fn alloc_batch(&self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
+        let mut indices = [0; 64];
+        let mut total = 0;
+        while total < max {
+            let limit = indices.len().min(max - total);
+            let n = self.alloc_n(&mut indices[..limit]);
+            out.extend(indices[..n].iter().map(|&idx| self.packet_buf(idx, 0)));
+            total += n;
+            if n < limit {
+                break;
+            }
+        }
+        total
     }
 
-    #[inline]
-    pub fn owns_memory(&self) -> bool {
-        self.owns_memory
+    pub(crate) fn available(&self) -> usize {
+        self.0.free_count.get()
     }
-
-    /// Per-frame capacity in bytes.
-    #[inline]
-    pub fn frame_size(&self) -> usize {
-        self.frame_size
+    pub(crate) fn num_frames(&self) -> usize {
+        self.0.num_frames
     }
-
-    /// Total arena size in bytes.
-    #[inline]
-    pub fn total_bytes(&self) -> usize {
-        self.total
+    pub(crate) fn frame_size(&self) -> usize {
+        self.0.frame_size
     }
 
     #[cfg(debug_assertions)]
-    #[inline]
     fn mark_used(&self, idx: usize, used: bool) {
-        let mut bits = self.in_use.borrow_mut();
-        let (byte, bit) = (idx / 8, idx % 8);
-        let mask = 1u8 << bit;
-
+        let old = self.0.in_use[idx].replace(used);
         if used {
-            assert_eq!(bits[byte] & mask, 0, "frame {idx} double-allocated");
-            bits[byte] |= mask;
+            assert!(!old, "frame {idx} double-allocated");
         } else {
-            assert_ne!(bits[byte] & mask, 0, "frame {idx} double-freed");
-            bits[byte] &= !mask;
+            assert!(old, "frame {idx} double-freed");
         }
     }
 }
 
-impl fmt::Debug for FramePool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FramePool")
-            .field("num_frames", &self.num_frames())
-            .field("frame_size", &self.frame_size())
-            .field("total_bytes", &self.total_bytes())
-            .field("owns_memory", &self.owns_memory())
-            .finish()
-    }
-}
-
-impl Drop for FramePool {
+impl Drop for PoolInner {
     fn drop(&mut self) {
-        if self.owns_memory {
-            // SAFETY: `ptr` was allocated with exactly this layout in `new`.
-            unsafe { alloc::dealloc(self.ptr.as_ptr(), self.layout) };
+        if let Some(layout) = self.layout {
+            unsafe { alloc::dealloc(self.ptr.as_ptr(), layout) };
         }
     }
 }
 
-/// A single frame loaned out by a [`FramePool`], owned by the application.
-///
-/// Recycles its frame back to the pool when dropped. `!Send` / `!Sync`, matching
-/// the single-core design.
-
+/// Exclusive packet storage. Handles are `!Send`/`!Sync`, may outlive their
+/// device, and return their frame on drop. A consumed TX slot becomes an empty
+/// zero-capacity buffer, which remains safe to inspect and drop.
 pub struct PacketBuf {
     ptr: NonNull<u8>,
-    _data_offset: usize,
+    data_offset: usize,
     capacity: usize,
     len: usize,
     idx: usize,
-    /// Pointer to the owning pool; `null` once recycled/sent (disarms `Drop`).
-    pool: *const FramePool,
+    pool: Option<FramePool>,
+}
+
+impl Default for PacketBuf {
+    fn default() -> Self {
+        Self {
+            ptr: NonNull::dangling(),
+            data_offset: 0,
+            capacity: 0,
+            len: 0,
+            idx: 0,
+            pool: None,
+        }
+    }
 }
 
 impl PacketBuf {
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(self.data_offset()), self.len) }
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(self.data_offset), self.len) }
     }
-
-    /// for later header prepends.
-    #[inline]
-    pub fn set_headroom(&mut self, headroom: usize) {
-        assert!(headroom + self.len <= self.capacity);
-        self._data_offset = headroom;
-    }
-
-    /// Prepend `bytes` to the front of the packet by moving `data_offset`
-    /// backward and copying. Zero-copy relative to the frame; only copies
-    /// the header bytes into the reserved headroom.
-    #[inline]
-    pub fn push_header(&mut self, bytes: &[u8]) {
-        assert!(
-            self._data_offset >= bytes.len(),
-            "headroom exhausted: need {} bytes, have {} remaining",
-            bytes.len(),
-            self._data_offset,
-        );
-        self._data_offset -= bytes.len();
-        self.len += bytes.len();
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                self.ptr.as_ptr().add(self._data_offset),
-                bytes.len(),
-            );
-        }
-    }
-
-    #[inline]
-    pub fn data_offset(&self) -> usize {
-        self._data_offset
-    }
-
-    /// Strip `n` bytes from the front of the packet (e.g. after parsing a
-    /// header that has been consumed). This moves `data_offset` forward.
-    #[inline]
-    pub fn pull_header(&mut self, n: usize) {
-        assert!(n <= self.len);
-        self._data_offset += n;
-        self.len -= n;
-    }
-
-    /// Number of valid bytes currently in the frame.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Whether the frame carries no valid bytes.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Total writable capacity of the frame in bytes.
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    /// The entire frame as a mutable slice from byte 0.
-    /// Used by backends for DMA/`read(2)`. Application payload should be
-    /// written at `data_offset` (or use `as_mut_packet` after setting len).
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: this buffer exclusively owns its frame.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity) }
     }
-
-    /// The valid packet bytes as a mutable slice.
     #[inline]
     pub fn as_mut_packet(&mut self) -> &mut [u8] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(self.data_offset()), self.len)
-        }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(self.data_offset), self.len) }
     }
-
-    /// Set the number of valid bytes (must be `<= capacity()`).
+    pub fn set_headroom(&mut self, headroom: usize) {
+        assert!(
+            headroom <= self.capacity - self.len,
+            "headroom exceeds capacity"
+        );
+        self.data_offset = headroom;
+    }
     #[inline]
     pub fn set_len(&mut self, len: usize) {
         assert!(
-            len <= self.capacity,
-            "len {len} exceeds capacity {}",
-            self.capacity
+            len <= self.capacity - self.data_offset,
+            "len exceeds available capacity"
         );
-
         self.len = len;
     }
-
-    /// Explicitly recycle this frame back to the pool.
-    ///
-    /// Equivalent to dropping the buffer; provided for clarity where the
-    /// application wants to make the return explicit.
-    #[inline]
-    pub fn recycle(mut self) {
-        self.recycle_inner();
+    pub fn push_header(&mut self, bytes: &[u8]) {
+        assert!(bytes.len() <= self.data_offset, "headroom exhausted");
+        self.data_offset -= bytes.len();
+        self.len += bytes.len();
+        self.as_mut_packet()[..bytes.len()].copy_from_slice(bytes);
+    }
+    pub fn pull_header(&mut self, n: usize) {
+        assert!(n <= self.len);
+        self.data_offset += n;
+        self.len -= n;
+    }
+    pub fn data_offset(&self) -> usize {
+        self.data_offset
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Entire frame size, including headroom. See `tail_capacity` for payload.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+    pub fn tail_capacity(&self) -> usize {
+        self.capacity - self.data_offset
+    }
+    pub fn recycle(self) {
+        drop(self);
     }
 
-    /// Consume the buffer and hand its frame to the device's *in-flight* state
-    /// (used by backends whose `send` queues frames rather than freeing them,
-    /// e.g. a loopback or a NIC completion ring). Returns the frame index and
-    /// length, disarming `Drop`.
-    #[inline]
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    pub(crate) fn belongs_to(&self, pool: &FramePool) -> bool {
+        self.pool
+            .as_ref()
+            .is_some_and(|p| Rc::ptr_eq(&p.0, &pool.0))
+    }
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    pub(crate) fn frame_index(&self) -> usize {
+        self.idx
+    }
+
+    /// Transfer the frame to a kernel ring, leaving a valid empty TX slot.
+    #[cfg(any(test, all(feature = "xdp", target_os = "linux")))]
     pub(crate) fn into_parts(mut self) -> (usize, usize) {
-        let (idx, len) = (self.idx, self.len);
-        self.pool = std::ptr::null();
-
-        (idx, len)
-    }
-
-    /// Disarm `Drop` **in place** without returning the frame to the pool.
-    ///
-    /// Used by backends that move a frame onto an in-flight queue (e.g. an
-    /// AF_XDP TX ring) while the caller still holds the slot: after the
-    /// backend has taken ownership via [`PacketBuf::into_parts`] on a copy,
-    /// this makes the caller's later `clear()`/drop of the stale slot a
-    /// no-op — the same idempotency contract as `recycle_frames`.
-    #[inline]
-    pub(crate) fn disarm(&mut self) {
-        self.pool = std::ptr::null();
-    }
-
-    /// Raw pointer to the valid bytes (for `write(2)`-style backends).
-    ///
-    /// Only the Linux TAP backend uses this today, so it reads as dead code on
-    /// non-Linux targets.
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn as_ptr(&self) -> *const u8 {
-        self.ptr.as_ptr()
-    }
-
-    #[inline]
-    fn recycle_inner(&mut self) {
-        if !self.pool.is_null() {
-            // SAFETY: the pool outlives this buffer (documented invariant), and
-            // `idx` is a live frame owned by this buffer.
-            unsafe { (*self.pool).free(self.idx) };
-            self.pool = std::ptr::null();
-        }
+        self.pool = None;
+        (self.idx, self.len)
     }
 }
-
 impl Drop for PacketBuf {
     #[inline]
     fn drop(&mut self) {
-        self.recycle_inner();
+        if let Some(pool) = &self.pool {
+            pool.free(self.idx);
+        }
     }
 }
-
 impl fmt::Debug for PacketBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PacketBuf")
             .field("len", &self.len)
             .field("capacity", &self.capacity)
             .field("frame", &self.idx)
-            .field("recycled", &self.pool.is_null())
+            .field("recycled", &self.pool.is_none())
             .finish()
     }
 }

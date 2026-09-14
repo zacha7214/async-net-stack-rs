@@ -12,9 +12,8 @@
 use std::collections::VecDeque;
 use std::io;
 
-use crate::device::Device;
 use crate::device::buffer_pool::{FramePool, PacketBuf};
-use crate::device::recycle_frames;
+use crate::device::Device;
 
 const FRAME_COUNT: usize = 256;
 const FRAME_SIZE: usize = 2048;
@@ -82,20 +81,16 @@ impl Device for LoopbackDevice {
         let slot_size = self.pool.frame_size();
         let n = max.min(self.rx.len());
 
-        for _ in 0..n {
-            let Some((slot, len)) = self.rx.pop_front() else {
-                break;
-            };
-            let Some(mut buf) = self.alloc() else {
-                // Pool exhausted: put the slot back and stop.
-                self.free_slots.push(slot);
-                break;
-            };
+        self.pool.alloc_batch(n, out);
+        for buf in out.iter_mut() {
+            let (slot, len) = self.rx.pop_front().expect("queue length checked");
+            if len > buf.tail_capacity() {
+                buf.set_headroom(0);
+            }
             let base = slot * slot_size;
             let off = buf.data_offset();
             buf.as_mut_slice()[off..off + len].copy_from_slice(&self.arena[base..base + len]);
             buf.set_len(len);
-            out.push(buf);
             self.free_slots.push(slot);
         }
 
@@ -106,12 +101,18 @@ impl Device for LoopbackDevice {
         let slot_size = self.pool.frame_size();
         let mut sent = 0usize;
 
-        for (i, frame) in frames.iter().enumerate() {
+        for frame in frames.iter_mut() {
             let src = frame.as_slice();
+            if src.is_empty() || src.len() > slot_size {
+                if sent > 0 {
+                    break;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid loopback frame length",
+                ));
+            }
             let Some(slot) = self.free_slots.pop() else {
-                // Kernel arena full: drop the rest (best-effort, like a full TX
-                // queue) and stop.
-                self.dropped += (frames.len() - i) as u64;
                 break;
             };
             let base = slot * slot_size;
@@ -120,14 +121,17 @@ impl Device for LoopbackDevice {
             sent += 1;
         }
 
-        // The device has taken ownership of the whole slice; recycle every frame.
-        recycle_frames(frames);
+        crate::device::recycle_frames(&mut frames[..sent]);
         Ok(sent)
     }
 
     fn alloc(&mut self) -> Option<PacketBuf> {
         let idx = self.pool.alloc()?;
         Some(self.pool.packet_buf(idx, 0))
+    }
+
+    fn alloc_batch(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
+        self.pool.alloc_batch(max, out)
     }
 
     fn frame_size(&self) -> usize {

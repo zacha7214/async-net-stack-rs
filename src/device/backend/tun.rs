@@ -85,12 +85,18 @@ pub(crate) fn read_datagram(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option
     let off = buf.data_offset();
     let room = buf.capacity() - off;
     // SAFETY: `buf` exclusively owns its frame; we read into `[off, off + room)`.
-    let n = unsafe {
-        libc::read(
-            fd,
-            buf.as_mut_slice()[off..].as_mut_ptr() as *mut libc::c_void,
-            room,
-        )
+    let n = loop {
+        let n = unsafe {
+            libc::read(
+                fd,
+                buf.as_mut_slice()[off..].as_mut_ptr() as *mut libc::c_void,
+                room,
+            )
+        };
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        break n;
     };
     if n < 0 {
         let e = io::Error::last_os_error();
@@ -122,15 +128,27 @@ pub(crate) fn read_datagram(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option
 ///
 /// TUN/TAP datagrams are consumed atomically: the kernel takes the whole packet
 /// or errors, so a short write is a programming error.
+#[cfg(target_os = "linux")]
 #[inline]
 pub(crate) fn write_datagram(fd: RawFd, buf: &PacketBuf) -> io::Result<()> {
     let data = buf.as_slice();
     // SAFETY: `data` is a valid slice of `buf`'s frame.
-    let n = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
+    let n = loop {
+        let n = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        break n;
+    };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
-    debug_assert_eq!(n as usize, data.len(), "short datagram write");
+    if n as usize != data.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "short datagram write",
+        ));
+    }
     Ok(())
 }
 

@@ -1,122 +1,138 @@
-//! [`XdpDevice`]: the AF_XDP `Device` implementation.
-//!
-//! Data path:
-//!
-//! * **recv** — drain RX-ring descriptors into [`PacketBuf`]s backed by the
-//!   UMEM (zero-copy: the kernel wrote the packet straight into pool
-//!   memory), then top the fill ring back up from the pool's free list
-//!   (frames the application dropped).
-//! * **send** — move every frame onto the TX ring (kicking the kernel as
-//!   needed) and return TX completions to the pool's free list.
-//! * **alloc** — hand out a free frame for TX; if the free list is empty,
-//!   reclaim fill-ring entries we pushed but the kernel has not consumed
-//!   yet, so TX-heavy workloads never starve.
-//!
-//! Frames are recycled into the pool free list by [`PacketBuf`]'s `Drop`,
-//! exactly like every other backend; the device just mediates between the
-//! pool free list and the kernel's rings.
-//!
-//! Notes on the initial version:
-//! * aligned UMEM chunks only (`chunk_size` a power of two >= 2048), and
-//!   `headroom == 0` (like the kernel's xdpsock): RX data lands at frame
-//!   byte 0, TX frames must be written from byte 0, so
-//!   [`PacketBuf::push_header`] has no room to prepend (there is no 4-byte
-//!   address-family prefix — that is a TUN quirk).
-//! * one queue, one socket; shared-UMEM/multi-queue and busy-poll are later.
-
-use std::io;
-#[cfg(test)]
-use std::os::fd::RawFd;
-
-use crate::device::buffer_pool::FramePool;
-use crate::device::{Device, PacketBuf};
-
+//! Single-queue AF_XDP with bounded batches and explicit frame ownership.
 use super::prog::{AttachMode, XskProgram};
 use super::socket::XskSocket;
 use super::sys::*;
-use super::umem::UMem;
+use super::umem::{validate_ring_size, UMem};
+use crate::device::buffer_pool::FramePool;
+use crate::device::{Device, PacketBuf};
+use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 
-/// Number of descriptors batched per ring interaction.
-const BATCH: usize = 64;
+/// Copy policy. Auto lets the kernel fall back; ZeroCopy is a strict probe.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum XdpMode {
+    #[default]
+    Auto,
+    Copy,
+    ZeroCopy,
+}
 
-/// Configuration for [`XdpDevice::with_config`].
 #[derive(Clone, Debug)]
 pub struct XdpConfig {
-    /// UMEM frame count.
     pub frames: usize,
-    /// UMEM chunk size (power of two >= 2048 in aligned mode).
     pub chunk_size: usize,
-    /// Bytes reserved at the front of each chunk (0 for now, see module docs).
+    /// Additional UMEM headroom; RX always honors the descriptor's offset,
+    /// which can also include the kernel's XDP_PACKET_HEADROOM.
     pub headroom: usize,
     pub fill_entries: usize,
     pub cq_entries: usize,
     pub rx_entries: usize,
     pub tx_entries: usize,
-    /// Load and attach the default redirect program (needs CAP_BPF +
-    /// CAP_NET_ADMIN). Without it, packets only flow if another program is
-    /// already attached and redirects to this queue's socket.
     pub attach: bool,
-    /// Attach in generic/skb mode instead of native driver mode. Required
-    /// on veth-style devices (and generally when the driver's native XDP
-    /// path does not deliver XSK redirects); also the only mode available
-    /// for devices without native XDP.
+    /// Force generic/skb XDP. Auto binds in copy mode when this is selected.
     pub attach_generic: bool,
-    /// XSKMAP size (max queue id + 1).
     pub max_queues: u32,
+    pub mode: XdpMode,
+    /// Maximum packets per recv/send/progress operation (1..=4096).
+    pub batch_size: usize,
+    /// Free frames withheld from RX refill so TX allocation can make progress.
+    pub tx_reserve: usize,
 }
-
 impl Default for XdpConfig {
     fn default() -> Self {
         Self {
-            frames: 1024,
+            frames: 4096,
             chunk_size: 4096,
             headroom: 0,
-            fill_entries: 1024,
-            cq_entries: 1024,
-            rx_entries: 512,
-            tx_entries: 512,
+            fill_entries: 2048,
+            cq_entries: 2048,
+            rx_entries: 1024,
+            tx_entries: 1024,
             attach: true,
             attach_generic: false,
             max_queues: 64,
+            mode: XdpMode::Auto,
+            batch_size: 64,
+            tx_reserve: 512,
         }
     }
 }
+impl XdpConfig {
+    pub fn validate(&self, queue: u32) -> io::Result<()> {
+        for entries in [
+            self.fill_entries,
+            self.cq_entries,
+            self.rx_entries,
+            self.tx_entries,
+        ] {
+            validate_ring_size(entries)?;
+        }
+        if self.frames < 2
+            || self.tx_reserve >= self.frames
+            || self.batch_size == 0
+            || self.batch_size > 4096
+            || !self.chunk_size.is_power_of_two()
+            || self.chunk_size < 2048
+            || self.chunk_size > u32::MAX as usize
+            || self.headroom > self.chunk_size - 256
+            || self.frames.checked_mul(self.chunk_size).is_none()
+            || self.max_queues == 0
+            || queue >= self.max_queues
+            || (self.attach_generic && self.mode == XdpMode::ZeroCopy)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid XDP configuration",
+            ));
+        }
+        Ok(())
+    }
+}
 
-/// AF_XDP network device over one interface queue.
-///
-/// `!Send` / `!Sync` like every backend: the UMEM rings are mapped in the
-/// creating process and the design is single-core.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XdpCounters {
+    pub rx_packets: u64,
+    pub tx_submitted: u64,
+    pub tx_completed: u64,
+    pub tx_backpressure: u64,
+    pub invalid_descriptors: u64,
+}
+const FREE: u8 = 0;
+const RX_KERNEL: u8 = 1;
+const APP: u8 = 2;
+const TX_KERNEL: u8 = 3;
+
 pub struct XdpDevice {
+    // Detach before closing the socket; outstanding PacketBufs retain arena.
+    prog: XskProgram,
     xsk: XskSocket,
-    /// Owns the XSKMAP + attached program; detaches on drop. No runtime use.
-    _prog: XskProgram,
     pool: FramePool,
+    umem: UMem,
+    state: Vec<u8>,
     rx_scratch: Vec<(u64, u32)>,
     tx_scratch: Vec<(u64, u32)>,
     cq_scratch: Vec<u64>,
-    reclaim_scratch: Vec<u64>,
-    chunk_size: usize,
-    headroom: usize,
+    indices: Vec<usize>,
+    fill_scratch: Vec<u64>,
+    cfg: XdpConfig,
+    rx_owned: usize,
+    rx_target: usize,
+    tx_pending: usize,
     attach_mode: AttachMode,
-    /// The UMEM outlives the pool: declared last so it drops last.
-    umem: UMem,
+    counters: XdpCounters,
 }
-
 impl XdpDevice {
-    /// Create a device on `ifname`, queue 0, with default configuration.
-    /// Tries zero-copy and falls back to copy mode automatically.
     pub fn new(ifname: &str, queue_id: u32) -> io::Result<Self> {
         Self::with_config(ifname, queue_id, &XdpConfig::default())
     }
-
     pub fn with_config(ifname: &str, queue_id: u32, cfg: &XdpConfig) -> io::Result<Self> {
-        let cifname = std::ffi::CString::new(ifname)
-            .map_err(|_| io::Error::other("interface name contains a NUL byte"))?;
-        let ifindex = unsafe { libc::if_nametoindex(cifname.as_ptr()) };
+        cfg.validate(queue_id)?;
+        let name = std::ffi::CString::new(ifname)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in interface name"))?;
+        let ifindex = unsafe { libc::if_nametoindex(name.as_ptr()) };
         if ifindex == 0 {
-            return Err(io::Error::other(format!("no such interface: {ifname}")));
+            return Err(io::Error::last_os_error());
         }
-
         let umem = UMem::new(
             cfg.frames,
             cfg.chunk_size,
@@ -125,229 +141,292 @@ impl XdpDevice {
             cfg.cq_entries,
             0,
         )?;
-        let xsk = XskSocket::new(
-            &umem,
-            ifindex,
-            queue_id,
-            cfg.rx_entries,
-            cfg.tx_entries,
-            XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP,
-        )?;
-        // SAFETY: the UMEM arena is mapped and unaliased, and the device
-        // holds `umem` (declared last) for the pool's entire lifetime.
-        let pool = unsafe {
-            FramePool::from_raw_parts(umem.base_ptr(), umem.len_bytes(), cfg.chunk_size, cfg.frames)
-        };
-
+        // Virtio and other drivers may initialize their XDP receive resources
+        // during attach. Bind only after that, with the redirect guard disabled.
         let mut prog = XskProgram::new(ifindex, cfg.max_queues)?;
         let attach_mode = if cfg.attach {
             prog.attach(cfg.attach_generic)?
         } else {
             AttachMode::None
         };
-        prog.set_socket(queue_id, xsk.fd())?;
-
-        let mut dev = Self {
-            xsk,
-            _prog: prog,
-            pool,
-            rx_scratch: Vec::with_capacity(BATCH),
-            tx_scratch: Vec::with_capacity(BATCH),
-            cq_scratch: Vec::with_capacity(BATCH),
-            reclaim_scratch: vec![0u64; BATCH],
-            chunk_size: cfg.chunk_size,
-            headroom: cfg.headroom,
-            attach_mode,
-            umem,
+        if attach_mode == AttachMode::AlreadyAttached {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "an XDP program is already attached; its XSKMAP is not this device's map",
+            ));
+        }
+        if attach_mode == AttachMode::Generic && cfg.mode == XdpMode::ZeroCopy {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "generic XDP cannot provide zero-copy",
+            ));
+        }
+        let flags = XDP_USE_NEED_WAKEUP
+            | match cfg.mode {
+                XdpMode::ZeroCopy => XDP_ZEROCOPY,
+                XdpMode::Copy => XDP_COPY,
+                XdpMode::Auto if attach_mode == AttachMode::Generic => XDP_COPY,
+                XdpMode::Auto => 0,
+            };
+        let xsk = XskSocket::new(
+            &umem,
+            ifindex,
+            queue_id,
+            cfg.rx_entries,
+            cfg.tx_entries,
+            flags,
+        )?;
+        let pool = unsafe {
+            FramePool::from_owned_region(
+                umem.base_ptr(),
+                umem.len_bytes(),
+                cfg.chunk_size,
+                cfg.frames,
+                umem.arena_owner(),
+            )
         };
-        if attach_mode == AttachMode::None {
-            eprintln!(
-                "xdp: no XDP program attached (attach disabled); \
-                 traffic needs an externally attached redirect program"
-            );
-        }
-
-        // Hand every frame to the kernel's fill ring; TX alloc reclaims on
-        // demand, RX drops flow back through the pool free list.
-        let mut idxs = vec![0usize; cfg.frames];
-        let n = dev.pool.alloc_n(&mut idxs);
-        let mut addrs = Vec::with_capacity(n);
-        for &idx in &idxs[..n] {
-            addrs.push(idx as u64 * cfg.chunk_size as u64);
-        }
-        let pushed = dev.umem.fill_push(&addrs);
-        debug_assert_eq!(pushed, n, "fill ring smaller than frame count");
-
+        let batch = cfg.batch_size;
+        let mut dev = Self {
+            prog,
+            xsk,
+            pool,
+            umem,
+            state: vec![FREE; cfg.frames],
+            rx_scratch: Vec::with_capacity(batch),
+            tx_scratch: Vec::with_capacity(batch),
+            cq_scratch: Vec::with_capacity(batch),
+            indices: vec![0; batch],
+            fill_scratch: vec![0; batch],
+            cfg: cfg.clone(),
+            rx_owned: 0,
+            rx_target: cfg.fill_entries.min(cfg.frames - cfg.tx_reserve),
+            tx_pending: 0,
+            attach_mode,
+            counters: XdpCounters::default(),
+        };
+        dev.refill();
+        dev.prog.set_socket(queue_id, dev.xsk.fd())?;
         Ok(dev)
     }
-
-    /// The bind flags the kernel actually accepted (zero-copy vs copy).
     pub fn bind_flags(&self) -> libc::c_ushort {
         self.xsk.bind_flags()
     }
-
-    /// Whether the kernel granted need-wakeup on this socket.
     pub fn need_wakeup_enabled(&self) -> bool {
         self.xsk.need_wakeup_enabled()
     }
-
-    /// `getsockopt(XDP_STATISTICS)` — first tool for diagnosing drops.
     pub fn stats(&self) -> io::Result<XdpStatistics> {
         self.xsk.stats()
     }
-
-    /// How the default program ended up attached.
+    pub fn counters(&self) -> XdpCounters {
+        self.counters
+    }
     pub fn attach_mode(&self) -> AttachMode {
         self.attach_mode
     }
+    pub fn is_zero_copy(&self) -> bool {
+        self.bind_flags() & XDP_ZEROCOPY != 0
+    }
+    pub fn pending_tx(&self) -> usize {
+        self.tx_pending
+    }
+    /// For explicitly attaching this device's program with bpftool when
+    /// `attach=false`. A separate redirect program must use this map.
+    pub fn map_fd(&self) -> RawFd {
+        self.prog.map_fd()
+    }
+    pub fn program_fd(&self) -> RawFd {
+        self.prog.program_fd()
+    }
 
+    /// Reap a bounded completion batch and drive RX/TX wakeups without waiting.
+    pub fn progress(&mut self) -> usize {
+        let n = self.drain_cq();
+        self.refill();
+        if self.tx_pending > 0 {
+            self.xsk.wake_tx();
+        }
+        n
+    }
+    fn drain_cq(&mut self) -> usize {
+        self.cq_scratch.clear();
+        let n = self.umem.cq_pop(&mut self.cq_scratch, self.cfg.batch_size);
+        let mut valid = 0;
+        for &addr in &self.cq_scratch {
+            let idx = (addr / self.cfg.chunk_size as u64) as usize;
+            if self.state.get(idx) != Some(&TX_KERNEL) {
+                self.counters.invalid_descriptors += 1;
+                continue;
+            }
+            self.state[idx] = FREE;
+            self.indices[valid] = idx;
+            valid += 1;
+        }
+        self.pool.free_n(&self.indices[..valid]);
+        self.tx_pending -= valid;
+        self.counters.tx_completed += valid as u64;
+        n
+    }
+    fn refill(&mut self) {
+        // Only the unpublished free list can provide RX frames. The shared FQ
+        // consumer does not tell us which buffers the hardware still owns.
+        let mut budget = (self.rx_target - self.rx_owned)
+            .min(self.pool.available().saturating_sub(self.cfg.tx_reserve));
+        while budget > 0 {
+            let limit = budget.min(self.indices.len());
+            let n = self.pool.alloc_n(&mut self.indices[..limit]);
+            for i in 0..n {
+                self.fill_scratch[i] = (self.indices[i] * self.cfg.chunk_size) as u64;
+            }
+            let pushed = self.umem.fill_push(&self.fill_scratch[..n]);
+            for &idx in &self.indices[..pushed] {
+                self.state[idx] = RX_KERNEL;
+            }
+            self.pool.free_n(&self.indices[pushed..n]);
+            self.rx_owned += pushed;
+            budget -= pushed;
+            if pushed < limit {
+                break;
+            }
+        }
+        // RX wakeup is poll(), not the TX sendto() kick. Check even when no
+        // new entries were published: NEED_WAKEUP can change while idle.
+        if !self.xsk.need_wakeup_enabled() || self.umem.fill_needs_wakeup() {
+            self.xsk.wake_rx();
+        }
+    }
     #[cfg(test)]
     pub(crate) fn debug_umem(&self) -> &UMem {
         &self.umem
     }
-
     #[cfg(test)]
     pub(crate) fn debug_socket(&self) -> &XskSocket {
         &self.xsk
     }
-
     #[cfg(test)]
     pub(crate) fn debug_prog_map_fd(&self) -> RawFd {
-        self._prog.map_fd()
+        self.map_fd()
     }
-
-    /// Return TX completions to the pool's free list.
-    fn drain_cq(&mut self) -> usize {
-        let mut total = 0;
-        loop {
-            self.cq_scratch.clear();
-            let n = self.umem.cq_pop(&mut self.cq_scratch, BATCH);
-            total += n;
-            if n == 0 {
-                break;
-            }
-            let mut idxs = [0usize; BATCH];
-            for (i, &addr) in self.cq_scratch.iter().enumerate() {
-                idxs[i] = addr as usize / self.chunk_size;
-            }
-            self.pool.free_n(&idxs[..n]);
-        }
-        total
-    }
-
-    /// Move frames from the pool free list to the kernel fill ring.
-    fn refill_fill_ring(&mut self) {
-        let mut idxs = [0usize; BATCH];
-        loop {
-            let n = self.pool.alloc_n(&mut idxs);
-            if n == 0 {
-                break;
-            }
-            let mut addrs = [0u64; BATCH];
-            for i in 0..n {
-                addrs[i] = idxs[i] as u64 * self.chunk_size as u64;
-            }
-            let pushed = self.umem.fill_push(&addrs[..n]);
-            if pushed < n {
-                // Fill ring full: give the remainder back to the pool.
-                self.pool.free_n(&idxs[pushed..n]);
-                break;
-            }
-        }
-    }
-
-    /// Reclaim fill-ring entries the kernel has not consumed for TX use.
-    fn reclaim_fill_for_tx(&mut self) {
-        self.reclaim_scratch.clear();
-        self.reclaim_scratch.resize(BATCH, 0);
-        let n = self.umem.fill_reclaim(&mut self.reclaim_scratch);
-        self.reclaim_scratch.truncate(n);
-        let mut idxs = [0usize; BATCH];
-        for (i, &addr) in self.reclaim_scratch.iter().enumerate() {
-            idxs[i] = addr as usize / self.chunk_size;
-        }
-        self.pool.free_n(&idxs[..n]);
-    }
-
-    /// Move every frame out of `frames`, disarm the (now stale) slots, and
-    /// convert to TX descriptors. `send` owns all frames per the `Device`
-    /// contract; `data_offset` is folded into the TX address so echoed RX
-    /// frames and fresh TX frames both transmit their payload bytes.
-    fn take_parts(&self, frames: &mut [PacketBuf]) -> Vec<(u64, u32)> {
-        let mut out = Vec::with_capacity(frames.len());
-        for i in 0..frames.len() {
-            // SAFETY: we exclusively own `frames`; each element is moved out
-            // exactly once and its slot is replaced with a valid,
-            // drop-disarmed state so the caller's later `clear()` is a
-            // no-op (same idempotency contract as `recycle_frames`).
-            let slot = unsafe { frames.as_mut_ptr().add(i) };
-            let buf = unsafe { std::ptr::read(slot) };
-            let off = buf.data_offset();
-            let (idx, len) = buf.into_parts();
-            unsafe { (&mut *slot).disarm() };
-            out.push((idx as u64 * self.chunk_size as u64 + off as u64, len as u32));
-        }
-        out
+}
+impl AsRawFd for XdpDevice {
+    fn as_raw_fd(&self) -> RawFd {
+        self.xsk.fd()
     }
 }
 
 impl Device for XdpDevice {
     fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> io::Result<usize> {
         out.clear();
+        self.progress();
         self.rx_scratch.clear();
-        let n = self.xsk.rx_pop(&mut self.rx_scratch, max);
-        for &(addr, len) in &self.rx_scratch[..n] {
-            let idx = addr as usize / self.chunk_size;
-            let mut buf = self.pool.packet_buf(idx, len as usize);
-            buf.set_headroom(self.headroom);
+        self.xsk
+            .rx_pop(&mut self.rx_scratch, max.min(self.cfg.batch_size));
+        for &(addr, len) in &self.rx_scratch {
+            let Some((idx, offset)) = decode_rx(addr, len, self.cfg.chunk_size, self.cfg.frames)
+            else {
+                self.counters.invalid_descriptors += 1;
+                continue; // quarantine malformed descriptors, never alias frames
+            };
+            if self.state[idx] != RX_KERNEL {
+                self.counters.invalid_descriptors += 1;
+                continue;
+            }
+            self.rx_owned -= 1;
+            self.state[idx] = APP;
+            let mut buf = self.pool.packet_buf(idx, 0);
+            buf.set_headroom(offset);
+            buf.set_len(len as usize);
             out.push(buf);
         }
-        self.refill_fill_ring();
+        self.counters.rx_packets += out.len() as u64;
+        Ok(out.len())
+    }
+    fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
+        self.drain_cq();
+        let requested = frames.len().min(self.cfg.batch_size);
+        let n = requested.min(self.xsk.tx_free_slots(requested));
+        if n < requested {
+            self.counters.tx_backpressure += 1;
+        }
+        // Validate before consuming anything; addresses from another UMEM must
+        // never be interpreted as this socket's frame indices.
+        for buf in &frames[..n] {
+            if !buf.belongs_to(&self.pool) || buf.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TX needs a nonempty frame from this XDP device",
+                ));
+            }
+        }
+        self.tx_scratch.clear();
+        for buf in &mut frames[..n] {
+            let idx = buf.frame_index();
+            self.tx_scratch.push((
+                (idx * self.cfg.chunk_size + buf.data_offset()) as u64,
+                buf.len() as u32,
+            ));
+            self.state[idx] = TX_KERNEL;
+            std::mem::take(buf).into_parts();
+        }
+        let pushed = self.xsk.tx_push(&self.tx_scratch);
+        assert_eq!(pushed, n, "single producer owns reserved TX slots");
+        self.tx_pending += n;
+        self.counters.tx_submitted += n as u64;
+        if self.tx_pending > 0 {
+            self.xsk.wake_tx();
+        }
         Ok(n)
     }
-
-    fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
-        let total = frames.len();
-        if total == 0 {
-            return Ok(0);
-        }
-
-        let descs = self.take_parts(frames);
-
-        let mut pushed = 0usize;
-        while pushed < descs.len() {
-            let n = self.xsk.tx_push(&descs[pushed..]);
-            pushed += n;
-            if pushed < descs.len() {
-                // TX ring full: reclaim completions, kick, and retry.
-                // The kernel always drains the TX ring, so this terminates.
-                self.drain_cq();
-                self.xsk.kick();
-                unsafe { libc::sched_yield() };
-            }
-        }
-
-        self.drain_cq();
-        self.refill_fill_ring();
-        self.tx_scratch = descs; // reuse the allocation next send
-        Ok(total)
-    }
-
     fn alloc(&mut self) -> Option<PacketBuf> {
-        self.drain_cq();
-        let idx = match self.pool.alloc() {
-            Some(idx) => idx,
-            None => {
-                self.reclaim_fill_for_tx();
-                self.pool.alloc()?
-            }
-        };
+        if self.pool.available() == 0 {
+            self.progress();
+        }
+        let idx = self.pool.alloc()?;
+        self.state[idx] = APP;
         let mut buf = self.pool.packet_buf(idx, 0);
-        buf.set_headroom(self.headroom);
+        buf.set_headroom(self.cfg.headroom);
         Some(buf)
     }
-
+    fn alloc_batch(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
+        self.drain_cq();
+        let n = self
+            .pool
+            .alloc_n(&mut self.indices[..max.min(self.cfg.batch_size)]);
+        for &idx in &self.indices[..n] {
+            self.state[idx] = APP;
+            let mut buf = self.pool.packet_buf(idx, 0);
+            buf.set_headroom(self.cfg.headroom);
+            out.push(buf);
+        }
+        n
+    }
     fn frame_size(&self) -> usize {
-        self.chunk_size
+        self.cfg.chunk_size
+    }
+}
+
+fn decode_rx(addr: u64, len: u32, chunk: usize, frames: usize) -> Option<(usize, usize)> {
+    let addr = usize::try_from(addr).ok()?;
+    let idx = addr / chunk;
+    let offset = addr % chunk;
+    (idx < frames && len > 0 && len as usize <= chunk - offset).then_some((idx, offset))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rx_offset_comes_from_descriptor() {
+        assert_eq!(decode_rx(4096 + 256, 1500, 4096, 4), Some((1, 256)));
+        assert_eq!(decode_rx(4000, 200, 4096, 4), None);
+        assert_eq!(decode_rx(u64::MAX, 1, 4096, 4), None);
+    }
+    #[test]
+    fn configuration_rejects_invalid_geometry_before_syscalls() {
+        let mut cfg = XdpConfig::default();
+        assert!(cfg.validate(0).is_ok());
+        cfg.tx_reserve = cfg.frames;
+        assert!(cfg.validate(0).is_err());
+        cfg.tx_reserve = 0;
+        cfg.fill_entries = 3;
+        assert!(cfg.validate(0).is_err());
     }
 }

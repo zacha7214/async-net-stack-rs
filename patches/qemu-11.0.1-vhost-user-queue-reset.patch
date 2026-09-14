@@ -1,0 +1,22 @@
+--- a/hw/net/virtio-net.c
++++ b/hw/net/virtio-net.c
+@@ -587,7 +587,8 @@
+     }
+ 
+     if (get_vhost_net(nc->peer) &&
+-        nc->peer->info->type == NET_CLIENT_DRIVER_TAP) {
++        (nc->peer->info->type == NET_CLIENT_DRIVER_TAP ||
++         nc->peer->info->type == NET_CLIENT_DRIVER_VHOST_USER)) {
+         vhost_net_virtqueue_reset(vdev, nc, queue_index);
+     }
+ 
+@@ -612,7 +613,8 @@
+     }
+ 
+     if (get_vhost_net(nc->peer) &&
+-        nc->peer->info->type == NET_CLIENT_DRIVER_TAP) {
++        (nc->peer->info->type == NET_CLIENT_DRIVER_TAP ||
++         nc->peer->info->type == NET_CLIENT_DRIVER_VHOST_USER)) {
+         r = vhost_net_virtqueue_restart(vdev, nc, queue_index);
+         if (r < 0) {
+             error_report("unable to restart vhost net virtqueue: %d, "

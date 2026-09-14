@@ -40,6 +40,7 @@ const IFLA_XDP_FLAGS: u16 = 3;
 const IFLA_XDP_EXPECTED_FD: u16 = 6;
 /// Netlink fallback only (bpf_link attaches are exclusive by nature).
 const XDP_FLAGS_UPDATE_IF_NOEXIST: u32 = 1;
+const XDP_FLAGS_REPLACE: u32 = 1 << 4;
 
 static NL_SEQ: AtomicU32 = AtomicU32::new(1);
 
@@ -122,9 +123,12 @@ impl XskProgram {
         map_set_u32(self.refcnt_fd.as_raw_fd(), 0, 1)
     }
 
-    #[cfg(test)]
     pub(crate) fn map_fd(&self) -> RawFd {
         self.map_fd.as_raw_fd()
+    }
+
+    pub(crate) fn program_fd(&self) -> RawFd {
+        self.prog_fd.as_raw_fd()
     }
 
     /// Attach the program. `prefer_generic` forces generic/skb mode (needed
@@ -173,6 +177,7 @@ impl XskProgram {
                 self.ifindex,
                 self.prog_fd.as_raw_fd(),
                 mode | XDP_FLAGS_UPDATE_IF_NOEXIST,
+                None,
             ) {
                 Ok(()) => {
                     self.detach_mode = Some(mode);
@@ -196,7 +201,12 @@ impl XskProgram {
         if let Some(mode) = self.detach_mode.take() {
             // Netlink fallback path: explicit detach. The bpf_link path
             // detaches when `link_fd` closes (Drop).
-            let _ = set_xdp(self.ifindex, -1, mode);
+            let _ = set_xdp(
+                self.ifindex,
+                -1,
+                mode | XDP_FLAGS_REPLACE,
+                Some(self.prog_fd.as_raw_fd()),
+            );
         }
     }
 }
@@ -245,12 +255,14 @@ fn put_i32(buf: &mut [u8], off: usize, v: i32) {
 /// `RTM_SETLINK` + `IFLA_XDP{IFLA_XDP_FD, IFLA_XDP_FLAGS}`.
 ///
 /// `prog_fd == -1` detaches. With `XDP_FLAGS_UPDATE_IF_NOEXIST` the kernel
-/// atomically fails with `EEXIST` if a program is already attached
-/// (`IFLA_XDP_EXPECTED_FD == 0`, kernel >= 5.4).
-fn set_xdp(ifindex: u32, prog_fd: RawFd, xdp_flags: u32) -> io::Result<()> {
-    let mode_flags = xdp_flags & (XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE);
-    let noexist = xdp_flags & XDP_FLAGS_UPDATE_IF_NOEXIST != 0 && prog_fd >= 0;
-
+/// atomically fails if a program is already attached. EXPECTED_FD is only
+/// supplied with REPLACE during detach, using the actual owned program fd.
+fn set_xdp(
+    ifindex: u32,
+    prog_fd: RawFd,
+    xdp_flags: u32,
+    expected: Option<RawFd>,
+) -> io::Result<()> {
     // nlmsghdr + ifinfomsg + IFLA_XDP nest {FD, FLAGS, EXPECTED_FD}
     let mut buf = vec![0u8; 64];
     // nlmsghdr
@@ -259,8 +271,15 @@ fn set_xdp(ifindex: u32, prog_fd: RawFd, xdp_flags: u32) -> io::Result<()> {
     put_u16(&mut buf, 6, NLM_F_REQUEST | NLM_F_ACK);
     put_u32(&mut buf, 8, NL_SEQ.fetch_add(1, Ordering::Relaxed));
     put_u32(&mut buf, 12, 0); // nlmsg_pid
-    // ifinfomsg
-    let ifi = IfInfomsg { family: 0, pad: 0, itype: 0, index: ifindex as i32, flags: 0, change: 0xFFFF_FFFF };
+                              // ifinfomsg
+    let ifi = IfInfomsg {
+        family: 0,
+        pad: 0,
+        itype: 0,
+        index: ifindex as i32,
+        flags: 0,
+        change: 0xFFFF_FFFF,
+    };
     buf[16] = ifi.family;
     buf[17] = ifi.pad;
     put_u16(&mut buf, 18, ifi.itype);
@@ -277,23 +296,29 @@ fn set_xdp(ifindex: u32, prog_fd: RawFd, xdp_flags: u32) -> io::Result<()> {
     put_u16(&mut buf, off + 2, IFLA_XDP_FD);
     put_u32(&mut buf, off + 4, prog_fd as u32);
     off += 8;
-    if mode_flags != 0 {
+    if xdp_flags != 0 {
         put_u16(&mut buf, off, 8);
         put_u16(&mut buf, off + 2, IFLA_XDP_FLAGS);
-        put_u32(&mut buf, off + 4, mode_flags);
+        put_u32(&mut buf, off + 4, xdp_flags);
         off += 8;
     }
-    if noexist {
+    if let Some(expected) = expected {
         put_u16(&mut buf, off, 8);
         put_u16(&mut buf, off + 2, IFLA_XDP_EXPECTED_FD);
-        put_u32(&mut buf, off + 4, 0);
+        put_u32(&mut buf, off + 4, expected as u32);
         off += 8;
     }
     put_u16(&mut buf, nest_start, (off - nest_start) as u16); // nest rta_len
     put_u32(&mut buf, 0, align4(off) as u32); // nlmsg_len
     buf.truncate(align4(off));
 
-    let fd = unsafe { libc::socket(AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, NETLINK_ROUTE) };
+    let fd = unsafe {
+        libc::socket(
+            AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            NETLINK_ROUTE,
+        )
+    };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -330,7 +355,14 @@ fn set_xdp(ifindex: u32, prog_fd: RawFd, xdp_flags: u32) -> io::Result<()> {
     // Wait for the ACK (NLMSG_ERROR) for our sequence number.
     let mut rx = vec![0u8; 4096];
     loop {
-        let n = unsafe { libc::recv(fd.as_raw_fd(), rx.as_mut_ptr() as *mut libc::c_void, rx.len(), 0) };
+        let n = unsafe {
+            libc::recv(
+                fd.as_raw_fd(),
+                rx.as_mut_ptr() as *mut libc::c_void,
+                rx.len(),
+                0,
+            )
+        };
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -338,12 +370,12 @@ fn set_xdp(ifindex: u32, prog_fd: RawFd, xdp_flags: u32) -> io::Result<()> {
         let mut off = 0usize;
         while off + 16 <= n {
             let len = read_u32(&rx, off) as usize;
-            if len < 16 {
+            if len < 16 || off + len > n {
                 break;
             }
             let mtype = read_u16(&rx, off + 4);
             let mseq = read_u32(&rx, off + 8);
-            if mtype == NLMSG_ERROR && mseq == seq {
+            if mtype == NLMSG_ERROR && mseq == seq && len >= 20 {
                 let error = read_i32(&rx, off + 16);
                 if error == 0 {
                     return Ok(());

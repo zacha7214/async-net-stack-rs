@@ -1,5 +1,6 @@
 //! A/B harness: the plain single-fd TUN loop vs the kqueue-driven sharded
 //! reactor (macOS only for the reactor; `--mode plain` works on both).
+//! This measures RX-drop only. See device_bench for JSON, warmup, and replies.
 //!
 //! Requires elevated privileges and externally configured interfaces (names are
 //! printed at startup; the reactor prints one name per shard).
@@ -11,13 +12,15 @@
 //!
 //! While it runs, send IP traffic at the printed interface(s) — e.g. from
 //! another terminal: `sudo ping -f -s 1400 10.0.0.2` (after `ifconfig`/`ip`),
-//! or iperf — and compare the reported Mpps/Gbps between the two modes.
+//! or a UDP sender — and compare the reported Mpps/Gbps between the two modes.
 
 use std::env;
 use std::error::Error as StdError;
 use std::io;
-use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,11 +29,13 @@ use async_net_stack_rs::device::{DefaultDevice, Device, PacketBuf};
 /// Frames read per batch (matches the device pool size).
 const BATCH: usize = 256;
 
+#[cfg(target_os = "macos")]
 struct Stats {
     packets: AtomicU64,
     bytes: AtomicU64,
 }
 
+#[cfg(target_os = "macos")]
 impl Default for Stats {
     fn default() -> Self {
         Self {
@@ -43,7 +48,7 @@ impl Default for Stats {
 fn main() -> Result<(), Box<dyn StdError>> {
     let args: Vec<String> = env::args().collect();
 
-    let mode = flag(&args, "--mode").unwrap_or_else(|| "reactor".to_string());
+    let mode = flag(&args, "--mode").unwrap_or_else(|| "plain".to_string());
     let shards: usize = flag(&args, "--shards")
         .map(|s| s.parse().expect("--shards must be an integer"))
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
@@ -84,7 +89,11 @@ fn run_plain(duration: Duration) -> Result<(), Box<dyn StdError>> {
     #[cfg(target_os = "linux")]
     let mut dev = DefaultDevice::new("tun0")?;
 
-    println!("plain: echo on {} (mtu {} bytes)", dev.name()?, dev.mtu()?);
+    println!(
+        "plain: RX-drop on {} (mtu {} bytes)",
+        dev.name()?,
+        dev.mtu()?
+    );
     println!("configure the interface, then send it IP traffic");
 
     let mut frames: Vec<PacketBuf> = Vec::with_capacity(BATCH);
@@ -107,7 +116,7 @@ fn run_plain(duration: Duration) -> Result<(), Box<dyn StdError>> {
         for buf in frames.iter() {
             bytes += buf.len() as u64;
         }
-        dev.send(&mut frames)?; // echo: all frames back-to-back in one call
+        frames.clear(); // RX-drop baseline; use echo_server for actual replies.
         packets += n as u64;
 
         let dt = last.elapsed().as_secs_f64();
@@ -156,17 +165,13 @@ fn run_reactor(shards: usize, duration: Duration) -> Result<(), Box<dyn StdError
     let worker_stats = stats.clone();
     let worker_stop = stop.clone();
     let runner = thread::spawn(move || {
-        reactor.run(worker_stop, move |_shard, dev, rx| {
-            for buf in rx.iter() {
-                worker_stats
-                    .bytes
-                    .fetch_add(buf.len() as u64, Ordering::Relaxed);
-            }
+        reactor.run(worker_stop, move |_shard, _dev, rx| {
+            let bytes = rx.iter().map(|buf| buf.len() as u64).sum::<u64>();
+            worker_stats.bytes.fetch_add(bytes, Ordering::Relaxed);
             worker_stats
                 .packets
                 .fetch_add(rx.len() as u64, Ordering::Relaxed);
-            // Echo: coalesced batch write of the whole received batch.
-            let _ = dev.send(rx);
+            rx.clear(); // one atomic update per counter per batch
         })
     });
 

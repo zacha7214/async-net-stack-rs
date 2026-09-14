@@ -8,14 +8,14 @@
 //! * RX/TX rings live on the socket (see [`super::socket::XskSocket`]).
 //!
 //! Frames move kernel → user through RX/CQ and user → kernel through
-//! FQ/TX. [`UMem::fill_reclaim`] lets a TX-heavy device take back entries
-//! it pushed but the kernel has not consumed yet, which is how the
-//! [`super::device::XdpDevice`] balances RX and TX demand without a fixed
-//! partition.
+//! FQ/TX. Once published, fill entries belong to the kernel. They MUST NOT
+//! be reclaimed by moving the producer backwards, even if the shared consumer
+//! appears unchanged (the kernel may have cached it).
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::sys::*;
@@ -205,8 +205,11 @@ impl Ring {
         debug_assert_eq!(self.desc_size, 16);
         // SAFETY: desc array bounds; published by the producer release.
         unsafe {
-            *self.desc.add(self.index(i) * 16).cast::<XdpDesc>() =
-                XdpDesc { addr, len, options: 0 };
+            *self.desc.add(self.index(i) * 16).cast::<XdpDesc>() = XdpDesc {
+                addr,
+                len,
+                options: 0,
+            };
         }
     }
 }
@@ -214,16 +217,17 @@ impl Ring {
 /// A UMEM region plus its fill/completion rings.
 pub struct UMem {
     /// Held for its lifetime: closing this fd tears the UMEM down.
-    _fd: OwnedFd,
+    pub(crate) _fd: Rc<OwnedFd>,
     /// The frame arena (externally owned by this struct; the `FramePool`
     /// wraps it without owning it).
-    map: Mmap,
+    map: Rc<Mmap>,
     fq: Ring,
     cq: Ring,
     chunk_size: usize,
     num_frames: usize,
     /// Our own fill-ring producer (we are the producer).
     cached_fill_producer: u32,
+    cached_fill_consumer: u32,
     /// Our own completion-ring consumer (we are the consumer).
     cached_cq_consumer: u32,
 }
@@ -243,12 +247,20 @@ impl UMem {
         cq_entries: usize,
         flags: u32,
     ) -> io::Result<Self> {
-        assert!(num_frames > 0, "num_frames must be > 0");
-        if flags & XDP_UMEM_UNALIGNED_CHUNK_FLAG == 0 {
-            assert!(
-                chunk_size.is_power_of_two() && chunk_size >= 2048,
-                "aligned UMEM chunk_size must be a power of two >= 2048, got {chunk_size}"
-            );
+        validate_ring_size(fill_entries)?;
+        validate_ring_size(cq_entries)?;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        if num_frames == 0
+            || chunk_size < 2048
+            || chunk_size > page_size
+            || headroom > chunk_size - 256
+            || flags & !XDP_UMEM_UNALIGNED_CHUNK_FLAG != 0
+            || (flags == 0 && !chunk_size.is_power_of_two())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid UMEM geometry or flags",
+            ));
         }
 
         let fd = unsafe { libc::socket(AF_XDP, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
@@ -275,10 +287,18 @@ impl UMem {
         };
         set_sockopt(fd.as_raw_fd(), XDP_UMEM_REG, &reg)
             .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_REG: {e}")))?;
-        set_sockopt(fd.as_raw_fd(), XDP_UMEM_FILL_RING, &(fill_entries as libc::c_int))
-            .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_FILL_RING: {e}")))?;
-        set_sockopt(fd.as_raw_fd(), XDP_UMEM_COMPLETION_RING, &(cq_entries as libc::c_int))
-            .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_COMPLETION_RING: {e}")))?;
+        set_sockopt(
+            fd.as_raw_fd(),
+            XDP_UMEM_FILL_RING,
+            &(fill_entries as libc::c_int),
+        )
+        .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_FILL_RING: {e}")))?;
+        set_sockopt(
+            fd.as_raw_fd(),
+            XDP_UMEM_COMPLETION_RING,
+            &(cq_entries as libc::c_int),
+        )
+        .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_COMPLETION_RING: {e}")))?;
 
         let mut offs = XdpMmapOffsets::default();
         get_sockopt(fd.as_raw_fd(), XDP_MMAP_OFFSETS, &mut offs)
@@ -301,13 +321,14 @@ impl UMem {
         .map_err(|e| io::Error::other(format!("completion ring mmap: {e}")))?;
 
         Ok(Self {
-            _fd: fd,
-            map,
+            _fd: Rc::new(fd),
+            map: Rc::new(map),
             fq,
             cq,
             chunk_size,
             num_frames,
             cached_fill_producer: 0,
+            cached_fill_consumer: fill_entries as u32,
             cached_cq_consumer: 0,
         })
     }
@@ -327,46 +348,36 @@ impl UMem {
         self.num_frames * self.chunk_size
     }
 
-    /// Entries we pushed to the fill ring that the kernel has not consumed
-    /// yet (still reclaimable).
-    fn fill_owned(&self) -> usize {
-        self.cached_fill_producer.wrapping_sub(self.fq.consumer_load()) as usize
+    pub(crate) fn arena_owner(&self) -> Rc<dyn std::any::Any> {
+        self.map.clone()
     }
 
-    /// Free slots in the fill ring.
-    fn fill_free_slots(&self) -> usize {
-        self.fq.entries as usize - self.fill_owned()
+    fn fill_free_slots(&mut self, needed: usize) -> usize {
+        let mut free = self
+            .cached_fill_consumer
+            .wrapping_sub(self.cached_fill_producer);
+        if (free as usize) < needed {
+            self.cached_fill_consumer = self.fq.consumer_load().wrapping_add(self.fq.entries);
+            free = self
+                .cached_fill_consumer
+                .wrapping_sub(self.cached_fill_producer);
+        }
+        free as usize
+    }
+
+    pub(crate) fn fill_needs_wakeup(&self) -> bool {
+        self.fq.flags_load() & XDP_RING_NEED_WAKEUP != 0
     }
 
     /// Push frame addresses onto the fill ring; returns how many fit.
-    /// Kicks the socket when the fill ring's need-wakeup flag is set (the
-    /// kernel went to sleep waiting for RX buffers).
+    /// The device issues a single RX poll after the complete refill batch.
     pub(crate) fn fill_push(&mut self, addrs: &[u64]) -> usize {
-        let n = addrs.len().min(self.fill_free_slots());
+        let n = addrs.len().min(self.fill_free_slots(addrs.len()));
         for (i, &addr) in addrs[..n].iter().enumerate() {
-            self.fq.write_desc64(self.cached_fill_producer + i as u32, addr);
+            self.fq
+                .write_desc64(self.cached_fill_producer.wrapping_add(i as u32), addr);
         }
         self.cached_fill_producer = self.cached_fill_producer.wrapping_add(n as u32);
-        if n > 0 {
-            self.fq.producer_store(self.cached_fill_producer);
-            if self.fq.flags_load() & XDP_RING_NEED_WAKEUP != 0 {
-                // Same fd as the bound socket in the single-socket model.
-                kick(self._fd.as_raw_fd());
-            }
-        }
-        n
-    }
-
-    /// Reclaim up to `max` unconsumed fill-ring entries (newest first) for
-    /// TX use; returns their addresses.
-    pub(crate) fn fill_reclaim(&mut self, addrs: &mut [u64]) -> usize {
-        let owned = self.fill_owned();
-        let n = addrs.len().min(owned);
-        for (i, slot) in addrs[..n].iter_mut().enumerate() {
-            let pos = self.fq.index(self.cached_fill_producer.wrapping_sub(1 + i as u32));
-            *slot = self.fq.desc64(pos as u32);
-        }
-        self.cached_fill_producer = self.cached_fill_producer.wrapping_sub(n as u32);
         if n > 0 {
             self.fq.producer_store(self.cached_fill_producer);
         }
@@ -399,5 +410,76 @@ impl UMem {
             self.fq.desc64(1),
             self.fq.desc64(2),
         )
+    }
+}
+
+/// Reject invalid sizes before opening or mapping any kernel resources.
+pub(crate) fn validate_ring_size(entries: usize) -> io::Result<()> {
+    if !entries.is_power_of_two() || entries > (1 << 30) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ring size must be a power of two <= 2^30",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+impl Ring {
+    pub(crate) fn simulated(entries: u32, desc_size: usize) -> Self {
+        let map = Mmap::anonymous(256 + entries as usize * desc_size).unwrap();
+        let base = map.as_ptr();
+        Self {
+            producer: base.cast(),
+            consumer: unsafe { base.add(64).cast() },
+            flags: unsafe { base.add(128).cast() },
+            desc: unsafe { base.add(256) },
+            _map: map,
+            entries,
+            mask: entries - 1,
+            desc_size,
+        }
+    }
+}
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+    #[test]
+    fn ring_descriptors_wrap_at_u32_boundary() {
+        let r = Ring::simulated(4, 16);
+        let first = u32::MAX - 1;
+        for i in 0..4 {
+            r.write_desc16(first.wrapping_add(i), i as u64 * 4096 + 256, 100);
+        }
+        r.producer_store(first.wrapping_add(4));
+        assert_eq!(r.producer_load().wrapping_sub(first), 4);
+        for i in 0..4 {
+            assert_eq!(
+                r.desc16(first.wrapping_add(i)),
+                (i as u64 * 4096 + 256, 100)
+            );
+        }
+    }
+    #[test]
+    fn fill_publication_never_reclaims_kernel_owned_entries() {
+        let file: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let mut umem = UMem {
+            _fd: Rc::new(file),
+            map: Rc::new(Mmap::anonymous(16384).unwrap()),
+            fq: Ring::simulated(4, 8),
+            cq: Ring::simulated(4, 8),
+            chunk_size: 4096,
+            num_frames: 4,
+            cached_fill_producer: u32::MAX - 1,
+            cached_fill_consumer: 2,
+            cached_cq_consumer: 0,
+        };
+        umem.fq.consumer_store(u32::MAX - 1);
+        assert_eq!(umem.fill_push(&[0, 4096, 8192, 12288]), 4);
+        assert_eq!(umem.fq.producer_load(), 2);
+        assert_eq!(umem.fill_push(&[0]), 0);
+        umem.fq.consumer_store(0); // model the kernel consuming two entries
+        assert_eq!(umem.fill_push(&[0, 4096]), 2);
+        assert_eq!(umem.fq.producer_load(), 4);
     }
 }

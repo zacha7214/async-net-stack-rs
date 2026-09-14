@@ -1,44 +1,28 @@
-//! AF_XDP socket: bind + RX/TX rings + need-wakeup kick.
-//!
-//! Feature probing lives in [`XskSocket::new`]: it first tries to bind with
-//! the requested flags (typically `XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP`) and,
-//! if the kernel/driver rejects zero-copy (`EOPNOTSUPP`/`ENOTSUPP`), retries
-//! with `XDP_COPY`. After a successful zero-copy bind it also verifies via
-//! `getsockopt(XDP_OPTIONS)` that the kernel really granted it.
-
+//! AF_XDP socket, cached ring counters, and independent RX/TX wakeups.
+use super::sys::*;
+use super::umem::{validate_ring_size, Ring, UMem};
 use std::io;
 use std::mem;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::rc::Rc;
 
-use super::sys::*;
-use super::umem::{Ring, UMem};
-
-/// A bound AF_XDP socket with its RX/TX rings mapped.
-///
-/// Single-socket model (like libxdp's `umem->refcount == 1` path): the RX/TX
-/// rings and the bind live on the UMEM's own socket fd. [`XskSocket`] only
-/// borrows that fd — [`UMem`] owns and closes it, so the UMEM must outlive
-/// the socket (the device declares the UMEM after the socket).
+/// A bound socket retaining its fd and arena even if the UMem wrapper moves or
+/// drops. The high-level device manages exclusive frame ownership.
 pub struct XskSocket {
-    fd: RawFd,
-    rx: Option<Ring>,
-    tx: Option<Ring>,
-    /// The bind flags the kernel actually accepted.
+    fd: Rc<OwnedFd>,
+    _arena: Rc<dyn std::any::Any>,
+    rx: Ring,
+    tx: Ring,
     bind_flags: libc::c_ushort,
-    /// Our TX producer (we are the producer).
     cached_tx_producer: u32,
-    /// Our RX consumer (we are the consumer).
+    cached_tx_consumer: u32,
     cached_rx_consumer: u32,
 }
 
 impl XskSocket {
-    /// Bind `umem`'s socket fd as an AF_XDP socket for `ifindex`/`queue_id`
-    /// and map its RX/TX rings.
-    ///
-    /// If zero-copy was requested and bind fails for **any** reason
-    /// (drivers differ: `EOPNOTSUPP`, `ENOTSUPP`, `EINVAL`, ...), retries
-    /// with `XDP_COPY` — the same policy as the kernel's xdpsock sample.
-    /// `rx_entries` and `tx_entries` must be powers of two.
+    /// Auto mode with kernel zero-copy-to-copy fallback. Explicit flags are
+    /// strict: XDP_ZEROCOPY fails when unsupported; XDP_COPY forces copying.
+    /// Omit both flags to let the kernel select the best supported mode.
     pub fn new(
         umem: &UMem,
         ifindex: u32,
@@ -47,57 +31,22 @@ impl XskSocket {
         tx_entries: usize,
         bind_flags: libc::c_ushort,
     ) -> io::Result<Self> {
-        assert!(rx_entries.is_power_of_two() && rx_entries > 0);
-        assert!(tx_entries.is_power_of_two() && tx_entries > 0);
-
+        validate_ring_size(rx_entries)?;
+        validate_ring_size(tx_entries)?;
+        if bind_flags & !(XDP_COPY | XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP) != 0
+            || bind_flags & (XDP_COPY | XDP_ZEROCOPY) == (XDP_COPY | XDP_ZEROCOPY)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported or conflicting bind flags",
+            ));
+        }
         let fd = umem.fd();
-        set_sockopt(fd, XDP_RX_RING, &(rx_entries as libc::c_int))?;
-        set_sockopt(fd, XDP_TX_RING, &(tx_entries as libc::c_int))?;
-
-        let copy_flags = (bind_flags & !XDP_ZEROCOPY) | XDP_COPY;
-        let mut last_err: Option<io::Error> = None;
-
-        for flags in [bind_flags, copy_flags] {
-            if last_err.is_some() && flags == bind_flags {
-                continue; // already tried exactly this
-            }
-            match Self::bind_and_map(fd, ifindex, queue_id, rx_entries, tx_entries, flags) {
-                Ok(sock) => return Ok(sock),
-                Err(e) => last_err = Some(e),
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| io::Error::other("AF_XDP bind failed")))
-    }
-
-    fn bind_and_map(
-        fd: RawFd,
-        ifindex: u32,
-        queue_id: u32,
-        rx_entries: usize,
-        tx_entries: usize,
-        flags: libc::c_ushort,
-    ) -> io::Result<Self> {
-        let sa = SockAddrXdp {
-            family: AF_XDP as libc::c_ushort,
-            flags,
-            ifindex,
-            queue_id,
-            shared_umem_fd: 0,
-        };
-        let ret = unsafe {
-            libc::bind(
-                fd,
-                &sa as *const SockAddrXdp as *const libc::sockaddr,
-                mem::size_of::<SockAddrXdp>() as libc::socklen_t,
-            )
-        };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
+        set_sockopt(fd, XDP_RX_RING, &(rx_entries as u32))?;
+        set_sockopt(fd, XDP_TX_RING, &(tx_entries as u32))?;
         let mut offs = XdpMmapOffsets::default();
         get_sockopt(fd, XDP_MMAP_OFFSETS, &mut offs)?;
+        // Map before bind; a mapping error must never cause a second bind.
         let rx = Ring::new(
             fd,
             &offs.rx,
@@ -112,111 +61,159 @@ impl XskSocket {
             tx_entries,
             mem::size_of::<XdpDesc>(),
         )?;
-
+        let sa = SockAddrXdp {
+            family: AF_XDP as _,
+            flags: bind_flags,
+            ifindex,
+            queue_id,
+            shared_umem_fd: 0,
+        };
+        let ret = unsafe {
+            libc::bind(
+                fd,
+                &sa as *const _ as *const libc::sockaddr,
+                mem::size_of::<SockAddrXdp>() as _,
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut opts = XdpOptions::default();
+        get_sockopt(fd, XDP_OPTIONS, &mut opts)?;
+        let active = if opts.flags & XDP_OPTIONS_ZEROCOPY != 0 {
+            XDP_ZEROCOPY
+        } else {
+            XDP_COPY
+        };
+        if bind_flags & XDP_ZEROCOPY != 0 && active != XDP_ZEROCOPY {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "kernel did not confirm zero-copy",
+            ));
+        }
         Ok(Self {
-            fd,
-            rx: Some(rx),
-            tx: Some(tx),
-            bind_flags: flags,
+            fd: umem._fd.clone(),
+            _arena: umem.arena_owner(),
+            rx,
+            tx,
+            bind_flags: (bind_flags & !(XDP_COPY | XDP_ZEROCOPY)) | active,
             cached_tx_producer: 0,
+            cached_tx_consumer: tx_entries as u32,
             cached_rx_consumer: 0,
         })
     }
-
     pub(crate) fn fd(&self) -> RawFd {
-        self.fd
+        self.fd.as_raw_fd()
     }
-
-    /// The bind flags the kernel actually accepted.
     pub fn bind_flags(&self) -> libc::c_ushort {
         self.bind_flags
     }
-
-    /// Whether the kernel granted `XDP_USE_NEED_WAKEUP`.
     pub fn need_wakeup_enabled(&self) -> bool {
-        match &self.tx {
-            Some(tx) => self.bind_flags & XDP_USE_NEED_WAKEUP != 0 && !tx.flags.is_null(),
-            None => false,
-        }
+        self.bind_flags & XDP_USE_NEED_WAKEUP != 0 && !self.tx.flags.is_null()
     }
-
-    /// `getsockopt(XDP_OPTIONS)` flags (e.g. zero-copy actually active).
     pub fn options(&self) -> io::Result<u32> {
         let mut opts = XdpOptions::default();
-        get_sockopt(self.fd, XDP_OPTIONS, &mut opts)?;
+        get_sockopt(self.fd(), XDP_OPTIONS, &mut opts)?;
         Ok(opts.flags)
     }
-
-    /// `getsockopt(XDP_STATISTICS)`.
     pub fn stats(&self) -> io::Result<XdpStatistics> {
         let mut stats = XdpStatistics::default();
-        get_sockopt(self.fd, XDP_STATISTICS, &mut stats)?;
+        get_sockopt(self.fd(), XDP_STATISTICS, &mut stats)?;
         Ok(stats)
     }
-
-    /// Kick the kernel (see [`super::sys::kick`]).
     pub fn kick(&self) {
-        kick(self.fd);
+        kick(self.fd());
     }
 
-    /// RX-ring state for diagnostics.
-    #[cfg(test)]
-    pub(crate) fn debug_rx_state(&self) -> (u32, u32, u32) {
-        let rx = self.rx.as_ref().expect("rx ring present");
-        (
-            self.cached_rx_consumer,
-            rx.producer_load(),
-            rx.consumer_load(),
-        )
-    }
-
-    /// True when the kernel asked to be kicked (read the TX ring flag).
-    fn tx_needs_wakeup(&self) -> bool {
-        match &self.tx {
-            Some(tx) => tx.flags_load() & XDP_RING_NEED_WAKEUP != 0,
-            None => true,
+    pub(crate) fn wake_tx(&self) {
+        if !self.need_wakeup_enabled() || self.tx.flags_load() & XDP_RING_NEED_WAKEUP != 0 {
+            self.kick();
         }
     }
-
-    /// Free slots in the TX ring.
-    fn tx_free_slots(&self) -> usize {
-        let tx = self.tx.as_ref().expect("tx ring present");
-        let consumer = tx.consumer_load();
-        tx.entries as usize - self.cached_tx_producer.wrapping_sub(consumer) as usize
+    pub(crate) fn wake_rx(&self) {
+        let mut pfd = libc::pollfd {
+            fd: self.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe {
+            libc::poll(&mut pfd, 1, 0);
+        }
     }
-
-    /// Pop up to `max` received `(addr, len)` descriptors from the RX ring.
+    pub(crate) fn tx_free_slots(&mut self, needed: usize) -> usize {
+        let mut free = self
+            .cached_tx_consumer
+            .wrapping_sub(self.cached_tx_producer);
+        if (free as usize) < needed {
+            self.cached_tx_consumer = self.tx.consumer_load().wrapping_add(self.tx.entries);
+            free = self
+                .cached_tx_consumer
+                .wrapping_sub(self.cached_tx_producer);
+        }
+        free as usize
+    }
     pub(crate) fn rx_pop(&mut self, out: &mut Vec<(u64, u32)>, max: usize) -> usize {
-        let rx = self.rx.as_ref().expect("rx ring present");
-        let prod = rx.producer_load();
-        let mut n = 0;
-        while self.cached_rx_consumer != prod && n < max {
-            out.push(rx.desc16(self.cached_rx_consumer));
-            self.cached_rx_consumer = self.cached_rx_consumer.wrapping_add(1);
-            n += 1;
+        let n = max.min(
+            self.rx
+                .producer_load()
+                .wrapping_sub(self.cached_rx_consumer) as usize,
+        );
+        for i in 0..n {
+            out.push(
+                self.rx
+                    .desc16(self.cached_rx_consumer.wrapping_add(i as u32)),
+            );
         }
+        self.cached_rx_consumer = self.cached_rx_consumer.wrapping_add(n as u32);
         if n > 0 {
-            rx.consumer_store(self.cached_rx_consumer);
+            self.rx.consumer_store(self.cached_rx_consumer);
         }
         n
     }
-
-    /// Push `(addr, len)` descriptors onto the TX ring; returns how many fit.
-    /// Kicks the kernel when the need-wakeup flag is set.
     pub(crate) fn tx_push(&mut self, descs: &[(u64, u32)]) -> usize {
-        let free = self.tx_free_slots();
-        let n = descs.len().min(free);
-        let tx = self.tx.as_ref().expect("tx ring present");
+        let n = descs.len().min(self.tx_free_slots(descs.len()));
         for (i, &(addr, len)) in descs[..n].iter().enumerate() {
-            tx.write_desc16(self.cached_tx_producer + i as u32, addr, len);
+            self.tx
+                .write_desc16(self.cached_tx_producer.wrapping_add(i as u32), addr, len);
         }
         self.cached_tx_producer = self.cached_tx_producer.wrapping_add(n as u32);
         if n > 0 {
-            tx.producer_store(self.cached_tx_producer);
-            if self.tx_needs_wakeup() {
-                self.kick();
-            }
+            self.tx.producer_store(self.cached_tx_producer);
         }
         n
+    }
+    #[cfg(test)]
+    pub(crate) fn debug_rx_state(&self) -> (u32, u32, u32) {
+        (
+            self.cached_rx_consumer,
+            self.rx.producer_load(),
+            self.rx.consumer_load(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tx_full_returns_immediately_and_wraps() {
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let mut socket = XskSocket {
+            fd: Rc::new(fd),
+            _arena: Rc::new(()),
+            rx: Ring::simulated(4, 16),
+            tx: Ring::simulated(4, 16),
+            bind_flags: XDP_COPY,
+            cached_tx_producer: u32::MAX - 1,
+            cached_tx_consumer: 2,
+            cached_rx_consumer: 0,
+        };
+        socket.tx.consumer_store(u32::MAX - 1);
+        assert_eq!(socket.tx_push(&[(256, 60); 5]), 4);
+        assert_eq!(socket.tx_push(&[(256, 60)]), 0);
+        assert_eq!(socket.tx.producer_load(), 2);
+        socket.tx.consumer_store(1);
+        assert_eq!(socket.tx_push(&[(512, 100); 4]), 3);
+        assert_eq!(socket.tx.producer_load(), 5);
     }
 }

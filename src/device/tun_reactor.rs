@@ -257,7 +257,7 @@ impl Kqueue {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kqueue, pin_thread_to_core};
+    use super::{pin_thread_to_core, Kqueue};
     use std::time::Duration;
 
     #[test]

@@ -1,0 +1,65 @@
+{
+  "date": "2026-09-13",
+  "os": "Darwin 25.6.0",
+  "architecture": "aarch64",
+  "rustc": "1.100.0-nightly (fd7ed57df 2026-08-29)",
+  "scope": "software-only, no NIC or Linux runtime measurement",
+  "pool_batches": [
+    {
+      "batch": 1,
+      "single_ns": 3.938499618406605,
+      "batch_ns": 8.404088853502357,
+      "speedup": 0.46864088267763343
+    },
+    {
+      "batch": 8,
+      "single_ns": 28.93395179228659,
+      "batch_ns": 18.401348527280476,
+      "speedup": 1.5723821408736025
+    },
+    {
+      "batch": 32,
+      "single_ns": 128.01352515819258,
+      "batch_ns": 58.88920116642163,
+      "speedup": 2.17380305085859
+    },
+    {
+      "batch": 64,
+      "single_ns": 260.79085011849133,
+      "batch_ns": 109.93620275979603,
+      "speedup": 2.372201727653843
+    },
+    {
+      "batch": 256,
+      "single_ns": 1047.5550965381615,
+      "batch_ns": 428.39568879867124,
+      "speedup": 2.445297942833571
+    }
+  ],
+  "legacy": [
+    {
+      "name": "alloc_recycle/batch_256",
+      "before_ns": 1037.001569825151,
+      "after_ns": 1045.7341385214847,
+      "change_percent": 0.8420979244810889
+    },
+    {
+      "name": "loopback_roundtrip/copy/64",
+      "before_ns": 1267.6333015977084,
+      "after_ns": 1309.6419171765242,
+      "change_percent": 3.3139406740000155
+    },
+    {
+      "name": "loopback_roundtrip/copy/512",
+      "before_ns": 3588.6691832369693,
+      "after_ns": 3619.693799638269,
+      "change_percent": 0.8645159198908292
+    },
+    {
+      "name": "loopback_roundtrip/copy/1500",
+      "before_ns": 9629.85450603597,
+      "after_ns": 9594.86597774802,
+      "change_percent": -0.3633339243705014
+    }
+  ]
+}

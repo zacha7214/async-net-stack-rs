@@ -159,9 +159,8 @@ pub(crate) fn get_sockopt<T>(fd: RawFd, opt: libc::c_int, value: &mut T) -> io::
 /// Kick the kernel on an AF_XDP socket:
 /// `sendto(fd, NULL, 0, MSG_DONTWAIT, NULL, 0)`.
 ///
-/// Needed whenever a ring the kernel is waiting on goes from empty to
-/// non-empty (fill ring after refills, TX ring after submissions) while
-/// `XDP_USE_NEED_WAKEUP` is in effect — and unconditionally in copy mode
+/// Used for TX while `XDP_USE_NEED_WAKEUP` requests it (FILL/RX wakeups
+/// must use poll instead) — and unconditionally in copy mode
 /// without need-wakeup. Errors are ignored (the kick is a hint; the
 /// kernel re-arms itself on the next poll).
 pub(crate) fn kick(fd: RawFd) {
@@ -213,23 +212,48 @@ pub(crate) struct BpfInsn {
 
 impl BpfInsn {
     pub(crate) const fn mov64_imm(dst: u8, imm: i32) -> Self {
-        Self { code: 0xB7, dst_src: dst, off: 0, imm }
+        Self {
+            code: 0xB7,
+            dst_src: dst,
+            off: 0,
+            imm,
+        }
     }
 
     /// `if r{dst} == imm goto pc+off` (BPF_JMP | BPF_JEQ | BPF_K).
     pub(crate) const fn jeq_imm(dst: u8, imm: i32, off: i16) -> Self {
-        Self { code: 0x15, dst_src: dst, off, imm }
+        Self {
+            code: 0x15,
+            dst_src: dst,
+            off,
+            imm,
+        }
     }
 
     pub(crate) const fn ldx_w(dst: u8, src: u8, off: i16) -> Self {
-        Self { code: 0x61, dst_src: dst | (src << 4), off, imm: 0 }
+        Self {
+            code: 0x61,
+            dst_src: dst | (src << 4),
+            off,
+            imm: 0,
+        }
     }
 
     /// `lddw dst, map_fd` with `BPF_PSEUDO_MAP_FD` — expands to two insns.
     pub(crate) const fn ld_map_fd(dst: u8, fd: u32) -> [Self; 2] {
         [
-            Self { code: 0x18, dst_src: dst | (BPF_PSEUDO_MAP_FD << 4), off: 0, imm: fd as i32 },
-            Self { code: 0x00, dst_src: 0, off: 0, imm: ((fd as u64) >> 32) as i32 },
+            Self {
+                code: 0x18,
+                dst_src: dst | (BPF_PSEUDO_MAP_FD << 4),
+                off: 0,
+                imm: fd as i32,
+            },
+            Self {
+                code: 0x00,
+                dst_src: 0,
+                off: 0,
+                imm: ((fd as u64) >> 32) as i32,
+            },
         ]
     }
 
@@ -239,17 +263,37 @@ impl BpfInsn {
     /// offset of the element inside the map value area.
     pub(crate) const fn ld_map_value(dst: u8, fd: u32, offset: u32) -> [Self; 2] {
         [
-            Self { code: 0x18, dst_src: dst | (BPF_PSEUDO_MAP_VALUE << 4), off: 0, imm: fd as i32 },
-            Self { code: 0x00, dst_src: 0, off: 0, imm: offset as i32 },
+            Self {
+                code: 0x18,
+                dst_src: dst | (BPF_PSEUDO_MAP_VALUE << 4),
+                off: 0,
+                imm: fd as i32,
+            },
+            Self {
+                code: 0x00,
+                dst_src: 0,
+                off: 0,
+                imm: offset as i32,
+            },
         ]
     }
 
     pub(crate) const fn call(helper: i32) -> Self {
-        Self { code: 0x85, dst_src: 0, off: 0, imm: helper }
+        Self {
+            code: 0x85,
+            dst_src: 0,
+            off: 0,
+            imm: helper,
+        }
     }
 
     pub(crate) const fn exit() -> Self {
-        Self { code: 0x95, dst_src: 0, off: 0, imm: 0 }
+        Self {
+            code: 0x95,
+            dst_src: 0,
+            off: 0,
+            imm: 0,
+        }
     }
 }
 
@@ -367,7 +411,8 @@ pub(crate) fn map_set_u32(map_fd: RawFd, key: u32, value: u32) -> io::Result<()>
 }
 
 /// Insert `socket_fd` into an XSKMAP at key `queue_id`.
-pub(crate) fn xskmap_set(map_fd: RawFd, queue_id: u32, socket_fd: RawFd) -> io::Result<()> {    let key = queue_id as u64;
+pub(crate) fn xskmap_set(map_fd: RawFd, queue_id: u32, socket_fd: RawFd) -> io::Result<()> {
+    let key = queue_id as u64;
     let value = socket_fd as u64;
     // SAFETY: zeroed union of plain scalars is a valid value.
     let mut attr: BpfAttr = unsafe { mem::zeroed() };
@@ -433,8 +478,14 @@ pub(crate) fn load_prog(insns: &[BpfInsn], name: &[u8]) -> io::Result<libc::c_lo
         Err(e) => {
             let tail = String::from_utf8_lossy(&log);
             let tail = tail.trim_end_matches('\0').trim();
-            let tail = if tail.len() > 512 { &tail[tail.len() - 512..] } else { tail };
-            Err(io::Error::other(format!("BPF_PROG_LOAD: {e}; verifier log: {tail}")))
+            let tail = if tail.len() > 512 {
+                &tail[tail.len() - 512..]
+            } else {
+                tail
+            };
+            Err(io::Error::other(format!(
+                "BPF_PROG_LOAD: {e}; verifier log: {tail}"
+            )))
         }
     }
 }
@@ -447,30 +498,65 @@ mod tests {
     fn insn_encoding_matches_uapi() {
         assert_eq!(
             BpfInsn::mov64_imm(0, 2),
-            BpfInsn { code: 0xB7, dst_src: 0x00, off: 0, imm: 2 }
+            BpfInsn {
+                code: 0xB7,
+                dst_src: 0x00,
+                off: 0,
+                imm: 2
+            }
         );
         assert_eq!(
             BpfInsn::ld_map_fd(1, 0x0000_0042),
             [
-                BpfInsn { code: 0x18, dst_src: 0x11, off: 0, imm: 0x42 },
-                BpfInsn { code: 0x00, dst_src: 0x00, off: 0, imm: 0 },
+                BpfInsn {
+                    code: 0x18,
+                    dst_src: 0x11,
+                    off: 0,
+                    imm: 0x42
+                },
+                BpfInsn {
+                    code: 0x00,
+                    dst_src: 0x00,
+                    off: 0,
+                    imm: 0
+                },
             ]
         );
         assert_eq!(
             BpfInsn::jeq_imm(2, 0, 5),
-            BpfInsn { code: 0x15, dst_src: 0x02, off: 5, imm: 0 }
+            BpfInsn {
+                code: 0x15,
+                dst_src: 0x02,
+                off: 5,
+                imm: 0
+            }
         );
         assert_eq!(
             BpfInsn::call(BPF_REDIRECT_MAP),
-            BpfInsn { code: 0x85, dst_src: 0, off: 0, imm: 51 }
+            BpfInsn {
+                code: 0x85,
+                dst_src: 0,
+                off: 0,
+                imm: 51
+            }
         );
         assert_eq!(
             BpfInsn::exit(),
-            BpfInsn { code: 0x95, dst_src: 0, off: 0, imm: 0 }
+            BpfInsn {
+                code: 0x95,
+                dst_src: 0,
+                off: 0,
+                imm: 0
+            }
         );
         assert_eq!(
             BpfInsn::ldx_w(2, 1, 16),
-            BpfInsn { code: 0x61, dst_src: 0x12, off: 16, imm: 0 }
+            BpfInsn {
+                code: 0x61,
+                dst_src: 0x12,
+                off: 16,
+                imm: 0
+            }
         );
     }
 

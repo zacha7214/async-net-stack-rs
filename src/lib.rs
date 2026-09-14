@@ -1,4 +1,4 @@
 mod api;
 pub mod device;
-mod net;
-mod transport;
+pub mod net;
+pub mod transport;

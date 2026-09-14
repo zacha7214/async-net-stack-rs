@@ -9,13 +9,13 @@ use std::io;
 use std::mem::zeroed;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-use crate::device::Device;
 use crate::device::backend::Error;
 use crate::device::buffer_pool::{FramePool, PacketBuf};
 use crate::device::recycle_frames;
+use crate::device::Device;
 
 use super::{
-    DEFAULT_MTU, frame_size_for_mtu, read_datagram, set_ifname, set_nonblocking, write_datagram,
+    frame_size_for_mtu, read_datagram, set_ifname, set_nonblocking, write_datagram, DEFAULT_MTU,
 };
 
 /// Path to the TUN clone device (must be NUL-terminated for `open`).
@@ -51,7 +51,14 @@ impl TunDevice {
     /// name is used verbatim (it must be shorter than `IFNAMSIZ`). Requires
     /// `CAP_NET_ADMIN` (typically root) and `/dev/net/tun` to exist.
     pub fn new_with_mtu(name: &str, mtu: usize) -> Result<Self, Error> {
-        if name.len() >= libc::IFNAMSIZ {
+        if !(68..=65535).contains(&mtu) {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MTU must be 68..=65535",
+            )));
+        }
+
+        if name.len() >= libc::IFNAMSIZ || name.contains('\0') {
             return Err(Error::InvalidTunnelName(name.to_owned()));
         }
 
@@ -89,6 +96,11 @@ impl TunDevice {
             name: assigned,
             pool: FramePool::new(FRAME_COUNT, frame_size_for_mtu(mtu), FRAME_ALIGN),
         })
+    }
+
+    #[cfg(feature = "io_uring")]
+    pub(crate) fn into_io_parts(self) -> (OwnedFd, String, FramePool) {
+        (self.fd, self.name, self.pool)
     }
 
     /// The assigned interface name (e.g. `tun0`). Infallible, but `Result` for a
@@ -160,18 +172,25 @@ impl Device for TunDevice {
             }
         }
 
-        // The device has taken ownership of the whole slice; recycle every frame.
-        recycle_frames(frames);
+        // Preserve unsent frames for retry after backpressure.
+        recycle_frames(&mut frames[..sent]);
 
+        if sent > 0 {
+            return Ok(sent);
+        }
         match err {
             Some(e) => Err(e),
-            None => Ok(sent),
+            None => Ok(0),
         }
     }
 
     fn alloc(&mut self) -> Option<PacketBuf> {
         let idx = self.pool.alloc()?;
         Some(self.pool.packet_buf(idx, 0))
+    }
+
+    fn alloc_batch(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
+        self.pool.alloc_batch(max, out)
     }
 
     fn frame_size(&self) -> usize {

@@ -1,33 +1,25 @@
 //! Tests that do not need privileges run unconditionally; the integration
 //! tests against a real interface are gated on the `XDP_TEST_IFACE` env var
-//! (socket/UMEM creation and bind are unprivileged).
+//! (socket/UMEM creation requires CAP_NET_RAW).
 
 use super::*;
 use crate::device::{Device, PacketBuf};
 
 /// End-to-end socket setup on a real interface, without touching XDP
-/// program attach (so it can run unprivileged). Run with e.g.
+/// program attach (socket creation needs CAP_NET_RAW). Run with e.g.
 /// `XDP_TEST_IFACE=enp0s1 cargo test --features xdp`.
 #[test]
+#[ignore = "requires a dedicated Linux test interface and capabilities"]
 fn umem_and_socket_on_test_iface() {
-    let Ok(ifname) = std::env::var("XDP_TEST_IFACE") else {
-        eprintln!("skipping: set XDP_TEST_IFACE to a network interface to run this test");
-        return;
-    };
+    let ifname =
+        std::env::var("XDP_TEST_IFACE").expect("set XDP_TEST_IFACE to an isolated interface");
     let cifname = std::ffi::CString::new(ifname.as_str()).unwrap();
     let ifindex = unsafe { libc::if_nametoindex(cifname.as_ptr()) };
     assert_ne!(ifindex, 0, "no such interface: {ifname}");
 
     let umem = UMem::new(128, 4096, 0, 128, 128, 0).expect("UMem::new");
-    let sock = XskSocket::new(
-        &umem,
-        ifindex,
-        0,
-        64,
-        64,
-        sys::XDP_ZEROCOPY | sys::XDP_USE_NEED_WAKEUP,
-    )
-    .expect("XskSocket::new (zero-copy or copy fallback)");
+    let sock = XskSocket::new(&umem, ifindex, 0, 64, 64, sys::XDP_USE_NEED_WAKEUP)
+        .expect("XskSocket::new (zero-copy or copy fallback)");
 
     let flags = sock.bind_flags();
     eprintln!(
@@ -66,14 +58,15 @@ fn umem_and_socket_on_test_iface() {
 /// Never point this at a production NIC: the redirect-all program takes
 /// every packet on the interface.
 #[test]
+#[ignore = "requires a dedicated Linux test interface and capabilities"]
 fn xdp_device_rx_on_test_iface() {
-    let Ok(ifname) = std::env::var("XDP_TEST_IFACE") else {
-        eprintln!("skipping: set XDP_TEST_IFACE to a network interface to run this test");
-        return;
-    };
+    let ifname =
+        std::env::var("XDP_TEST_IFACE").expect("set XDP_TEST_IFACE to an isolated interface");
 
-    let mut cfg = XdpConfig::default();
-    cfg.attach_generic = true; // veth has native XDP but no XSK redirect path
+    let cfg = XdpConfig {
+        attach_generic: true,
+        ..XdpConfig::default()
+    };
     let mut dev = XdpDevice::with_config(&ifname, 0, &cfg).expect("XdpDevice::with_config");
     eprintln!(
         "attach: {:?}, bind flags: 0x{:x}, need-wakeup: {}",
@@ -117,14 +110,15 @@ fn xdp_device_rx_on_test_iface() {
 ///     | grep xdp_def_prog | awk '{print $1}' | tr -d :) dev xdpt0
 /// ```
 #[test]
+#[ignore = "requires a dedicated Linux test interface and capabilities"]
 fn xdp_device_rx_with_c_prog() {
-    let Ok(ifname) = std::env::var("XDP_TEST_IFACE") else {
-        eprintln!("skipping: set XDP_TEST_IFACE to a network interface to run this test");
-        return;
-    };
+    let ifname =
+        std::env::var("XDP_TEST_IFACE").expect("set XDP_TEST_IFACE to an isolated interface");
 
-    let mut cfg = XdpConfig::default();
-    cfg.attach = false; // attached externally via bpftool
+    let cfg = XdpConfig {
+        attach: false,
+        ..XdpConfig::default()
+    };
     let mut dev = XdpDevice::with_config(&ifname, 0, &cfg).expect("XdpDevice::with_config");
 
     // Inject the socket into this device's own XSKMAP (the attached program

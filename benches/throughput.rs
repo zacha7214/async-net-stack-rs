@@ -7,14 +7,20 @@
 //! the software-path baseline a real TUN device — and later an AF_XDP zero-copy
 //! device — should be compared against.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use async_net_stack_rs::device::{Device, LoopbackDevice, PacketBuf};
 
 /// Number of frames moved per round-trip iteration.
 const BATCH: usize = 64;
 
-criterion_group!(benches, bench_alloc_recycle, bench_loopback_roundtrip);
+criterion_group!(
+    benches,
+    bench_alloc_recycle,
+    bench_loopback_roundtrip,
+    bench_batch_api,
+    bench_batched_pipeline
+);
 criterion_main!(benches);
 
 /// Frame-pool allocator throughput: allocate a batch and recycle it by clearing.
@@ -92,4 +98,66 @@ fn roundtrip(
         }
     }
     black_box(sum);
+}
+
+/// Compare per-frame allocation against the public batch API. Each operation
+/// reports frames/s; payload size has no effect on this metadata-only test.
+fn bench_batch_api(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pool_batch_api");
+    for &batch in &[1usize, 8, 32, 64, 256] {
+        group.throughput(Throughput::Elements(batch as u64));
+        for batched in [false, true] {
+            group.bench_with_input(
+                BenchmarkId::new(if batched { "batch" } else { "single" }, batch),
+                &batch,
+                |b, &batch| {
+                    let mut dev = LoopbackDevice::with_capacity(batch, batch);
+                    let mut bufs = Vec::with_capacity(batch);
+                    b.iter(|| {
+                        if batched {
+                            assert_eq!(dev.alloc_batch(batch, &mut bufs), batch);
+                        } else {
+                            for _ in 0..batch {
+                                bufs.push(dev.alloc().unwrap());
+                            }
+                        }
+                        black_box(&bufs);
+                        bufs.clear();
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+/// Application-delivered bytes (count each payload once). No full-payload
+/// checksum in the timed loop: the legacy roundtrip test above includes it.
+fn bench_batched_pipeline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batched_copy_pipeline");
+    for &payload in &[64usize, 512, 1500] {
+        for &batch in &[1usize, 8, 32, 64, 256] {
+            group.throughput(Throughput::Bytes((payload * batch) as u64));
+            group.bench_function(BenchmarkId::new(format!("bytes_{payload}"), batch), |b| {
+                let mut dev = LoopbackDevice::with_capacity(batch * 2, batch * 2);
+                let mut tx = Vec::with_capacity(batch);
+                let mut rx = Vec::with_capacity(batch);
+                b.iter(|| {
+                    tx.clear();
+                    rx.clear();
+                    assert_eq!(dev.alloc_batch(batch, &mut tx), batch);
+                    for buf in &mut tx {
+                        buf.set_len(payload);
+                        buf.as_mut_packet().fill(0xab);
+                    }
+                    assert_eq!(dev.send(&mut tx).unwrap(), batch);
+                    assert_eq!(dev.recv(batch, &mut rx).unwrap(), batch);
+                    for buf in &rx {
+                        black_box(buf.as_slice());
+                    }
+                });
+            });
+        }
+    }
+    group.finish();
 }

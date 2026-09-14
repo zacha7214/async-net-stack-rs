@@ -243,8 +243,8 @@ fn alloc_n_partial_when_pool_low() {
 
     // Unfilled slots should be untouched (or zero, doesn't matter — we only
     // inspect out[..n]).
-    for i in 0..n {
-        assert!(out[i] < 3);
+    for &idx in &out[..n] {
+        assert!(idx < 3);
     }
 }
 
@@ -449,7 +449,7 @@ fn loopback_send_recycles_frames() {
 }
 
 #[test]
-fn loopback_drops_when_arena_full() {
+fn loopback_preserves_unsent_when_arena_full() {
     // Four pool frames, two kernel slots: all four frames can be built, but only
     // two fit in the kernel queue — the other two are dropped.
     let mut dev = LoopbackDevice::with_capacity(4, 2);
@@ -463,7 +463,9 @@ fn loopback_drops_when_arena_full() {
     }
 
     assert_eq!(dev.send(&mut tx).unwrap(), 2);
-    assert_eq!(dev.dropped(), 2);
+    assert_eq!(dev.dropped(), 0);
+    assert_eq!(tx[2].as_slice(), &[2; 8]);
+    assert_eq!(tx[3].as_slice(), &[3; 8]);
     assert_eq!(dev.queued(), 2);
 }
 

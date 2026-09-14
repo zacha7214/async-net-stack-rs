@@ -1,52 +1,111 @@
+# async-net-stack-rs
 
-# Project Vision
----
-**A WIP async TCP/IP stack that aims to move 10 Gbps of traffic on a single core with < 2 µs per‑packet latency, using true zero‑copy buffers.**
+A small, single-core Rust networking stack for learning and measuring Linux
+AF_XDP and copying backends. The long-term target is 10 Gb/s on one core;
+**that is a goal, not a measured hardware result**.
 
-A secondary goal, is to reach line rate with non zero copy workloads on home networks (any NIC), and identify which existing linux kernel drivers can support zero-copy, but have not been backported. In those cases, if I believe the evidence shows that doing so could helpful, I plan to use the data obtained from this project to implement zero copy in those drivers myself.
-# Phase 1
----
-**Setup Buffer Pool that will pre-allocate the packet pool + indices list for TAP devices, or provide an mmap ptr for zero-copy backends.
-Set up tap device with benchmarks and samples to establish a baseline for which future devices can be tested against.
-# Phase 2
----
-Setup XDP backend on linux, /dev/bpf telemetry on macOS.
+The device backends use handwritten libc/kernel interfaces. Packet handles
+own their arena through a non-atomic reference count, so they can safely outlive
+a moved or dropped device without cloning payloads.
 
-# Phase 3
----
+## Implemented
 
-Production quality XDP backend on linux, /dev/bpf on macOS. Full benchmarks for comparison on different well support zero-copy NICs.
-The long term goal is possibly to extend support for zero copy NICs, with the ability to document the state of existing ones. Learning and improving is always a big part as well, thus I am going to avoid using existing crates for the networking backends. The idea is to really understand whats going on, and maybe provide something different enough to be useful to others.**
+| Backend | Platform | Data path |
+| --- | --- | --- |
+| AF_XDP (`xdp`) | Linux | RX/TX/FILL/CQ rings; strict zero-copy, forced copy, or kernel auto selection |
+| TUN (`tun`, default) | Linux | Nonblocking read/write into a reusable packet pool |
+| utun (`tun`) | macOS | Nonblocking read and scatter/gather write; optional kqueue shards |
+| io_uring TUN (`io_uring`) | Linux 6.0+ | Experimental batched READ/WRITE, fixed file registration, owned buffers through CQ completion |
+| Loopback | Both | In-memory copy model for tests and microbenchmarks |
 
-## High‑Level Architecture
+`net::Responder` answers Ethernet ARP, IPv4 ICMP echo, and UDP echo in place.
+The Ethernet parser handles up to two VLAN tags. Fragmented IP, IPv4 options,
+IPv6/NDP, TCP, routing, multi-buffer XDP and shared-UMEM/multi-queue dispatch are
+not implemented. The device API is poll-based; it is not yet an async TCP socket
+API. `af_packet` remains an empty compatibility feature.
 
+## Start testing
+
+```sh
+cargo test --locked --all-targets --all-features
+cargo bench --locked --bench throughput
+cargo run --release --example device_bench -- \
+  --backend loopback --action tx --batch 64 --size 1500 --warmup 2 --seconds 10
 ```
-+---------------------------+   +-----------------------------+
-|  Application (async API)  |   |  Benchmark / Test Harness   |
-+------------+--------------+   +--------------+--------------+
-             |                                 |
-   async I/O (Futures, Wakers)                |
-             |                                 |
-+------------v--------------+   +--------------v--------------+
-|  Transport Layer (TCP)    |   |  UDP, ICMP, Raw sockets      |
-+------------+--------------+   +--------------+--------------+
-             |                                 |
-   Packet Buffers (Bytes/Arc)                  |
-             |                                 |
-+------------v--------------+   +--------------v--------------+
-|  Network Layer (IP)       |   |  ARP, NDP, Routing tables   |
-+------------+--------------+   +--------------+--------------+
-             |                                 |
-   Zero‑copy Device driver(AF_XDP, DPDK,       |
-                            or TAP)            |
-             |                                 |
-+------------v--------------+   +--------------v--------------+
-|  Physical NIC (or Virtual)                         |
-+-------------------------------------------------+
+
+Linux: build once, then run a test isolated from the host's interfaces:
+
+```sh
+cargo build --locked --release --features xdp,io_uring --examples
+sudo ./scripts/linux-veth-smoke.sh
 ```
-* **Zero‑copy** is achieved by **never cloning the payload**. A packet lives in a **reference‑counted buffer** (`Arc<[u8]>` or `bytes::Bytes`) that is handed from the driver → IP → TCP → application. The driver returns the buffer to the pool when the future resolves.
 
-* **Async I/O** is built on **Tokio’s `Poll`/`Waker`** model. The driver registers its Rx/Tx queues with a **`mio::Poll`** (or Tokio’s reactor) and wakes the corresponding future when a new packet arrives or a Tx slot opens.
+The script creates two temporary network namespaces, tests ARP/ping/UDP through
+generic AF_XDP copy mode, checks TX completions, saves JSON logs in `/tmp`, and
+removes its interfaces/namespaces. It needs `ip`, `ping`, `ethtool`, and Python 3.
+It **does not test driver zero-copy**.
 
-* **Performance tuning** knobs (MTU, NUMA, off‑load) are exposed as **runtime configuration** (env vars, CLI flags, or a tiny JSON/YAML file).
----
+For TUN/utun ICMP and UDP echo:
+
+```sh
+cargo build --release --example echo_server --example udp_load
+sudo ./target/release/examples/echo_server
+# Configure the printed interface in another terminal (instructions in example).
+./target/release/examples/udp_load 10.9.0.2:9000 --count 10000 --window 32
+```
+
+See [benchmark methodology](docs/benchmarking.md), [VM/virtio-net experiments](docs/vm-xdp.md),
+and [implementation notes](docs/design.md) before comparing results.
+
+For a Mac host zero-copy experiment, try the new
+[shared-memory NIC lab](docs/mac-shared-memory.md). `shm_nic` compares direct
+shared-frame access against host/consumer staging copies across two processes,
+with batched descriptors, completions and optional pipe notifications. The guide
+also develops the QEMU igb, virtio/vhost-user and vmnet integration designs.
+
+To run the actual guest-buffer experiment, follow the
+[QEMU 11.0.1 vhost-user lab](docs/vhost-user-lab.md). It includes a QEMU queue-reset
+patch, host launcher, guest configuration, `vhost_user_net` generator, and
+`xdp_vm_rx` receiver with sampled physical-address verification. The host protocol
+tests run locally; end-to-end AF_XDP validation requires your Linux guest.
+
+```sh
+cargo run --release --example shm_nic -- --mode direct --batch 64 --size 1500
+```
+
+## Ownership and backpressure
+
+`recv(max, out)` clears/recycles the previous `out` and returns at most `max`
+packets. `alloc_batch(max, out)` appends fresh TX handles. `send(frames)` accepts
+a prefix and returns its length. Accepted slots become valid empty buffers;
+**the unsent suffix stays yours to retry**. An error consumes no input frames.
+This replaces the original drop-everything-on-send contract.
+
+```rust
+use async_net_stack_rs::device::{Device, PacketBuf};
+fn flush<D: Device>(dev: &mut D, tx: &mut Vec<PacketBuf>) -> std::io::Result<()> {
+    let accepted = dev.send(tx)?;
+    tx.drain(..accepted);
+    // Retry the remaining suffix after progress/readiness, rather than spinning.
+    Ok(())
+}
+```
+
+XDP and io_uring return submission acceptance, not wire delivery. Call their
+`progress()` methods to drive/reap outstanding work, and inspect completions,
+errors, drops, and peer counts. `PacketBuf::capacity()` includes headroom;
+`tail_capacity()` is the writable packet capacity at the current data offset.
+
+An XDP program redirects all traffic arriving on the selected queue to this
+stack. Use an isolated interface, not the NIC carrying your management session.
+Existing attachments produce an error; netlink cleanup checks program ownership.
+Raw AF_XDP sockets need CAP_NET_RAW, and program/map setup also needs the relevant
+BPF/network administration capabilities. TUN creation needs CAP_NET_ADMIN.
+
+## Validation status
+
+macOS tests, benchmark smoke runs, and Linux cross-compilation are recorded in
+[local results](docs/local-results.md). Privileged Linux datapath tests are
+provided but were not run on the development Mac. CI includes native Linux and
+macOS tests plus an isolated veth integration job. Zero-copy NIC/virtio results
+must be collected on your chosen guest kernel and host configuration.

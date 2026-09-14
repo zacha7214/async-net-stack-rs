@@ -15,7 +15,7 @@ mod prog;
 mod socket;
 mod umem;
 
-pub use device::{XdpConfig, XdpDevice};
+pub use device::{XdpConfig, XdpCounters, XdpDevice, XdpMode};
 pub use prog::AttachMode;
 pub use socket::XskSocket;
 pub use sys::XdpStatistics;

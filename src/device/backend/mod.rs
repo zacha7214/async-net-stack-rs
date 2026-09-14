@@ -9,3 +9,6 @@ pub mod af_xdp;
 
 #[cfg(all(feature = "tun", any(target_os = "linux", target_os = "macos")))]
 pub use tun::DefaultDevice;
+
+#[cfg(all(feature = "io_uring", target_os = "linux"))]
+pub mod uring;
