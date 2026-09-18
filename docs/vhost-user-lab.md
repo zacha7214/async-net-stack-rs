@@ -41,6 +41,11 @@ See the [vhost-user transport requirements](https://www.qemu.org/docs/master/int
 
 ## 2. Apply the QEMU lab patches and rebuild
 
+`scripts/qemu-lab.py` does everything in this section — clone, patch, configure,
+build and code-sign — and refuses to go on if the result lacks vhost-user or
+`queue_reset`. See [kernel-lab.md](kernel-lab.md) section 0. Read on for what it
+is doing and why, and for the cases where you want to drive it yourself.
+
 There are two independent fixes. **Native Mac builds need the header fix first:**
 `hw/net/vhost_net.c` includes `linux-headers/linux/vhost.h` solely for
 `VHOST_FILE_UNBIND`. That Linux ioctl header pulls in `<linux/vhost_types.h>` and

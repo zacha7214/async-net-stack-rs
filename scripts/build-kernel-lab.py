@@ -5,6 +5,7 @@ Needs gcc, make, flex, bison, bc, libssl-dev, libelf-dev, busybox-static, cpio,
 binutils, Python 3, and Rust/Cargo. Does not install/reboot the builder's kernel.
 """
 import argparse
+import datetime
 import gzip
 import hashlib
 import json
@@ -81,7 +82,16 @@ def main():
     run(make + [f'-j{a.jobs}', 'Image', 'scripts_gdb'])
     release = (build / 'include/config/kernel.release').read_text().strip()
     # Publish only after all build/package steps succeed; retain older bundles.
-    bundle = Path(tempfile.mkdtemp(prefix='bundle-', dir=work))
+    # The name carries the build time and kernel release because the work
+    # directory is sometimes copied out wholesale: "bundle-j2xkot6c" says nothing
+    # about which kernel it holds, and several builds accumulate side by side.
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    safe = ''.join(c if c.isalnum() or c in '._+' else '-' for c in release)
+    bundle = work / f'bundle-{stamp}-{safe}'
+    for attempt in range(2, 100):
+        if not bundle.exists(): break
+        bundle = work / f'bundle-{stamp}-{safe}-{attempt}'
+    bundle.mkdir()
     for src, name in [(build/'arch/arm64/boot/Image', 'Image'), (build/'vmlinux', 'vmlinux'),
                       (build/'System.map', 'System.map'), (build/'.config', 'config')]:
         shutil.copy2(src, bundle/name)

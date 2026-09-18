@@ -77,6 +77,13 @@ first. The bundle is built for debugging: full DWARF, no KASLR and no modules, s
 can single-step the early ARM64 boot path from `primary_entry` through the MMU
 handoff into `start_kernel`, using stock QEMU.
 
+`scripts/qemu-lab.py` is the entry point for both labs on a fresh checkout: it
+clones QEMU at the known-good tag, applies `patches/`, builds and code-signs it,
+then offers the tests your kernel bundle supports and launches the one you pick.
+Run it with no arguments. The kernel itself is built by `scripts/kernel-lab-build.py`
+on whichever builder you choose — `--builder local`, `ssh`, `docker` or
+`multipass` — and only the finished bundle is copied back.
+
 ```sh
 cargo run --release --example shm_nic -- --mode direct --batch 64 --size 1500
 ```

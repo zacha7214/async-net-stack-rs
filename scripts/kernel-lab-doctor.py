@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Check every prerequisite for the QEMU kernel lab and print how to fix gaps.
 
-Reports on this host and, with --instance, on the Multipass builder VM. Read-only:
-it installs nothing and modifies nothing. Exit status 1 means a required check
-failed; warnings alone still exit 0.
+Reports on this host and on the selected builder (--builder). Read-only: it
+installs nothing and modifies nothing, beyond starting and removing a container
+when the builder is Docker. Exit status 1 means a required check failed;
+warnings alone still exit 0.
 """
 import argparse
 import json
@@ -12,6 +13,9 @@ import platform
 import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lab_builders  # noqa: E402
 
 OK, WARN, FAIL = 'ok', 'warn', 'FAIL'
 VM_TOOLS = ('make', 'gcc', 'flex', 'bison', 'bc', 'cpio', 'nm', 'readelf', 'busybox', 'cargo')
@@ -69,6 +73,17 @@ def check_host(r, qemu, backend):
         r.add(OK if vhost else WARN, 'qemu vhost-user',
               'supported' if vhost else 'missing',
               'needed only for the XDP data path; --no-lab-nic boots without it')
+        # Stock QEMU also advertises vhost-user, so the check above cannot tell a
+        # lab build from a distribution one. qemu-lab.py records what it applied.
+        record = qemu.parent/'qemu-lab.json'
+        try: patches = json.loads(record.read_text()).get('patches', [])
+        except (OSError, ValueError): patches = None
+        patched = patches is not None and any('queue-reset' in p for p in patches)
+        r.add(OK if patched else WARN, 'qemu lab patches',
+              ', '.join(patches) if patched else
+              ('none recorded' if patches is not None else f'no {record.name} beside the binary'),
+              'the data path needs the queue-reset patch; build with: '
+              'python3 scripts/qemu-lab.py --build-only')
 
     for name in ('lldb', 'gdb', 'aarch64-elf-gdb'):
         path = shutil.which(name)
@@ -85,22 +100,9 @@ def check_host(r, qemu, backend):
               'cargo build --locked --release --example vhost_user_net')
 
 
-def check_vm(r, instance, source, work):
-    if not shutil.which('multipass'):
-        r.add(FAIL, 'multipass', 'not on PATH', 'install Multipass, or build in another ARM64 Linux host')
-        return
-    code, out = probe(['multipass', 'info', instance, '--format', 'json'])
-    if code:
-        r.add(FAIL, 'instance', f'{instance} not found', f'multipass launch --name {instance} 24.04')
-        return
-    try: state = json.loads(out)['info'][instance]['state']
-    except (ValueError, KeyError): state = 'unknown'
-    r.add(OK if state == 'Running' else FAIL, 'instance', f'{instance}: {state}',
-          f'multipass start {instance}')
-    if state != 'Running': return
-
+def check_builder(r, builder, source, work):
     def vm(*args):
-        return probe(['multipass', 'exec', instance, '--', *args])
+        return builder.run(list(args), capture=True)
 
     _, arch = vm('uname', '-sm')
     good = 'Linux' in arch and 'aarch64' in arch
@@ -144,10 +146,13 @@ def check_vm(r, instance, source, work):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--instance', default='tito-burrito', help='Multipass builder; "" skips VM checks')
-    p.add_argument('--source', default='/home/ubuntu/arm64_dev_kernel')
-    p.add_argument('--work', default='/home/ubuntu/async-net-kernel-lab')
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    lab_builders.add_arguments(p)
+    p.add_argument('--source', default='/home/ubuntu/arm64_dev_kernel',
+                   help='kernel source tree on the builder, or here for --builder docker')
+    p.add_argument('--work', default=None, help='scratch directory on the builder')
+    p.add_argument('--skip-builder', action='store_true', help='check this host only')
     p.add_argument('--qemu', type=Path, help='QEMU binary to inspect; default searches PATH')
     p.add_argument('--backend', type=Path, default=Path('target/release/examples/vhost_user_net'))
     a = p.parse_args()
@@ -156,14 +161,27 @@ def main():
     check_host(host, a.qemu, a.backend)
     host.show('host')
     failed = host.failed
-    if a.instance:
-        vm = Report()
-        check_vm(vm, a.instance, a.source, a.work)
-        vm.show(f'builder vm: {a.instance}')
-        failed = failed or vm.failed
+    # "--instance ''" has always meant "host checks only"; --skip-builder is the
+    # way to say that for the builders where an instance name is meaningless.
+    if not a.skip_builder and not (a.builder == 'multipass' and not a.instance):
+        builder = lab_builders.from_args(a, source=a.source)
+        report = Report()
+        reason = builder.check()
+        report.add(OK if not reason else FAIL, 'builder', builder.describe(), reason)
+        if not reason:
+            work = a.work or lab_builders.default_work(a.builder)
+            source, work = builder.paths(a.source, work)
+            try:
+                with builder:
+                    check_builder(report, builder, source, work)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                report.add(FAIL, 'builder', 'unusable', str(error))
+        report.show(f'builder: {builder.describe()}')
+        failed = failed or report.failed
     print('\nFAIL entries block the lab; warn entries only limit which runs are possible.'
           if failed else '\nAll required checks passed.')
-    print('Next: python3 scripts/multipass-kernel-lab.py --output results/kernel-lab')
+    print('Next: python3 scripts/kernel-lab-build.py '
+          + ' '.join(lab_builders.forward(a)) + ' --output results/kernel-lab')
     return 1 if failed else 0
 
 
