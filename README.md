@@ -24,6 +24,23 @@ IPv6/NDP, TCP, routing, multi-buffer XDP and shared-UMEM/multi-queue dispatch ar
 not implemented. The device API is poll-based; it is not yet an async TCP socket
 API. `af_packet` remains an empty compatibility feature.
 
+## Virtual pools and network behavior labs
+
+`api::UdpPool` binds multiple virtual UDP services, discovers peers, expires
+leases and preserves bounded TX backpressure. `simulation::Network` connects
+pool-backed devices with deterministic delay, reordering, loss, partitions and
+MTU black holes. Unicast transfers packet ownership without copying payloads.
+
+```sh
+cargo run --release --example pool_lab -- --workers 32 --batch 256 --reorder-us 5000
+# Linux kernel UDP -> TUN virtual workers, in a fresh network namespace:
+cargo build --release --example tun_pool
+sudo ./scripts/linux-pool-lab.sh --window 256
+```
+
+See the [network behavior lab](docs/network-lab.md) for the APIs, kernel queue and
+netem experiments, measurement limits and reproducible fault semantics.
+
 ## Start testing
 
 ```sh
@@ -68,6 +85,21 @@ To run the actual guest-buffer experiment, follow the
 patch, host launcher, guest configuration, `vhost_user_net` generator, and
 `xdp_vm_rx` receiver with sampled physical-address verification. The host protocol
 tests run locally; end-to-end AF_XDP validation requires your Linux guest.
+
+For a reproducible guest kernel, the [QEMU kernel lab](docs/kernel-lab.md) builds a
+small ARM64 kernel and initramfs inside a Multipass VM and exports a checksummed
+bundle you can boot here. `scripts/kernel-lab-doctor.py` checks the prerequisites
+first. The bundle is built for debugging: full DWARF, no KASLR and no modules, so
+`scripts/run-kernel-lab.py --no-lab-nic --debug` plus `scripts/debug-kernel-lab.py`
+can single-step the early ARM64 boot path from `primary_entry` through the MMU
+handoff into `start_kernel`, using stock QEMU.
+
+`scripts/qemu-lab.py` is the entry point for both labs on a fresh checkout: it
+clones QEMU at the known-good tag, applies `patches/`, builds and code-signs it,
+then offers the tests your kernel bundle supports and launches the one you pick.
+Run it with no arguments. The kernel itself is built by `scripts/kernel-lab-build.py`
+on whichever builder you choose — `--builder local`, `ssh`, `docker` or
+`multipass` — and only the finished bundle is copied back.
 
 ```sh
 cargo run --release --example shm_nic -- --mode direct --batch 64 --size 1500
