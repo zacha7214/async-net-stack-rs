@@ -69,6 +69,14 @@ patch, host launcher, guest configuration, `vhost_user_net` generator, and
 `xdp_vm_rx` receiver with sampled physical-address verification. The host protocol
 tests run locally; end-to-end AF_XDP validation requires your Linux guest.
 
+For a reproducible guest kernel, the [QEMU kernel lab](docs/kernel-lab.md) builds a
+small ARM64 kernel and initramfs inside a Multipass VM and exports a checksummed
+bundle you can boot here. `scripts/kernel-lab-doctor.py` checks the prerequisites
+first. The bundle is built for debugging: full DWARF, no KASLR and no modules, so
+`scripts/run-kernel-lab.py --no-lab-nic --debug` plus `scripts/debug-kernel-lab.py`
+can single-step the early ARM64 boot path from `primary_entry` through the MMU
+handoff into `start_kernel`, using stock QEMU.
+
 ```sh
 cargo run --release --example shm_nic -- --mode direct --batch 64 --size 1500
 ```
