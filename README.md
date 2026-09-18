@@ -24,6 +24,23 @@ IPv6/NDP, TCP, routing, multi-buffer XDP and shared-UMEM/multi-queue dispatch ar
 not implemented. The device API is poll-based; it is not yet an async TCP socket
 API. `af_packet` remains an empty compatibility feature.
 
+## Virtual pools and network behavior labs
+
+`api::UdpPool` binds multiple virtual UDP services, discovers peers, expires
+leases and preserves bounded TX backpressure. `simulation::Network` connects
+pool-backed devices with deterministic delay, reordering, loss, partitions and
+MTU black holes. Unicast transfers packet ownership without copying payloads.
+
+```sh
+cargo run --release --example pool_lab -- --workers 32 --batch 256 --reorder-us 5000
+# Linux kernel UDP -> TUN virtual workers, in a fresh network namespace:
+cargo build --release --example tun_pool
+sudo ./scripts/linux-pool-lab.sh --window 256
+```
+
+See the [network behavior lab](docs/network-lab.md) for the APIs, kernel queue and
+netem experiments, measurement limits and reproducible fault semantics.
+
 ## Start testing
 
 ```sh

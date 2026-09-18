@@ -100,3 +100,48 @@ mod tests {
         assert_eq!(responder.respond(&mut buf, LinkLayer::Ip), Reply::Ignored);
     }
 }
+
+/// A validated, borrowed IPv4 UDP datagram. Ethernet framing must be removed
+/// by the caller. Options and fragments are intentionally unsupported.
+#[derive(Debug, Clone, Copy)]
+pub struct Datagram<'a> {
+    pub source: std::net::SocketAddrV4,
+    pub destination: std::net::SocketAddrV4,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_ipv4(packet: &[u8]) -> io::Result<Datagram<'_>> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid or unsupported IPv4 UDP",
+        )
+    };
+    if packet.len() < 28 || packet[0] != 0x45 || packet[9] != 17 || packet[8] == 0 {
+        return Err(invalid());
+    }
+    let total = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    if total < 28
+        || total > packet.len()
+        || u16::from_be_bytes([packet[6], packet[7]]) & !0x4000 != 0
+        || checksum(&packet[..20]) != 0
+    {
+        return Err(invalid());
+    }
+    let source: [u8; 4] = packet[12..16].try_into().unwrap();
+    let destination: [u8; 4] = packet[16..20].try_into().unwrap();
+    let udp = &packet[20..total];
+    if u16::from_be_bytes([udp[4], udp[5]]) as usize != udp.len()
+        || (udp[6..8] != [0, 0] && ipv4_checksum(source, destination, udp) != 0)
+    {
+        return Err(invalid());
+    }
+    Ok(Datagram {
+        source: std::net::SocketAddrV4::new(source.into(), u16::from_be_bytes([udp[0], udp[1]])),
+        destination: std::net::SocketAddrV4::new(
+            destination.into(),
+            u16::from_be_bytes([udp[2], udp[3]]),
+        ),
+        payload: &udp[8..],
+    })
+}
