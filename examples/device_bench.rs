@@ -104,6 +104,7 @@ impl BenchDevice for async_net_stack_rs::device::XdpDevice {
             "invalid_descriptors": c.invalid_descriptors, "kernel": kernel})
     }
 }
+
 #[cfg(all(feature = "io_uring", target_os = "linux"))]
 impl BenchDevice for async_net_stack_rs::device::UringTunDevice {
     fn progress(&mut self) -> std::io::Result<()> {
@@ -121,6 +122,7 @@ impl BenchDevice for async_net_stack_rs::device::UringTunDevice {
             "last_errno": s.last_errno})
     }
 }
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     if args.batch == 0
@@ -136,9 +138,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("invalid batch/duration/size (42 <= size <= MTU)".into());
     }
+
     if let Some(cpu) = args.cpu {
         pin_cpu(cpu)?;
     }
+
     match args.backend.as_str() {
         "loopback" => {
             if args.action != "tx" {
@@ -150,6 +154,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 LinkLayer::Ip,
             )
         }
+
         #[cfg(feature = "tun")]
         "tun" => {
             #[cfg(target_os = "macos")]
@@ -159,6 +164,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 async_net_stack_rs::device::DefaultDevice::new_with_mtu(&args.iface, args.mtu)?;
             run(dev, &args, LinkLayer::Ip)
         }
+
         #[cfg(all(feature = "xdp", target_os = "linux"))]
         "xdp" => {
             use async_net_stack_rs::device::{XdpConfig, XdpDevice, XdpMode};
@@ -184,6 +190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 LinkLayer::Ethernet,
             )
         }
+
         #[cfg(all(feature = "io_uring", target_os = "linux"))]
         "uring" => {
             use async_net_stack_rs::device::{UringConfig, UringTunDevice};
@@ -197,9 +204,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 LinkLayer::Ip,
             )
         }
+
         _ => Err("backend unavailable: enable tun/xdp/io_uring on its supported OS".into()),
     }
 }
+
 fn mac(s: &str) -> Result<[u8; 6], Box<dyn Error>> {
     let bytes: Vec<u8> = s
         .split(':')
@@ -209,6 +218,7 @@ fn mac(s: &str) -> Result<[u8; 6], Box<dyn Error>> {
         .try_into()
         .map_err(|_| "MAC must contain six octets")?)
 }
+
 fn pin_cpu(cpu: usize) -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     {
@@ -231,17 +241,20 @@ fn pin_cpu(cpu: usize) -> Result<(), Box<dyn Error>> {
         Err("exact CPU affinity is supported only on Linux".into())
     }
 }
+
 fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), Box<dyn Error>> {
     let responder = Responder {
         ipv4: args.ip.octets(),
         mac: mac(&args.mac)?,
         udp_port: Some(args.port),
     };
+
     let bytes = if args.action == "tx" {
         let mut template = dev.alloc().ok_or("no TX frame")?;
         if args.size > template.tail_capacity() {
             return Err("size exceeds backend payload capacity".into());
         }
+
         let l2 = if link == LinkLayer::Ethernet { 14 } else { 0 };
         udp::build_ipv4(
             &mut template,
@@ -250,6 +263,7 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
             &vec![0xa5; args.size - 28 - l2],
             0,
         )?;
+
         let mut bytes = Vec::with_capacity(args.size);
         if l2 > 0 {
             bytes.extend(mac(&args.peer_mac)?);
@@ -258,15 +272,18 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
         }
         bytes.extend(template.as_slice());
         drop(template);
+
         bytes
     } else {
         Vec::new()
     };
+
     eprintln!(
         "configure the peer now; warmup={}s; device={}",
         args.warmup,
         dev.details()
     );
+
     let mut tx: Vec<PacketBuf> = Vec::with_capacity(args.batch);
     let mut rx: Vec<PacketBuf> = Vec::with_capacity(args.batch);
     let mut latencies = Vec::with_capacity(65536);
@@ -276,6 +293,7 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
         if !warmup {
             before = dev.details();
         }
+
         let start = Instant::now();
         let deadline = start + Duration::from_secs_f64(duration);
         let (mut rx_packets, mut rx_bytes, mut tx_packets, mut tx_bytes) = (0u64, 0u64, 0u64, 0u64);
@@ -283,6 +301,7 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
         while Instant::now() < deadline {
             let sample = (!warmup && args.latency && latencies.len() < latencies.capacity())
                 .then(Instant::now);
+
             let mut work = 0;
             if args.action == "tx" && tx.is_empty() {
                 dev.alloc_batch(args.batch, &mut tx);
@@ -294,6 +313,7 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
                     buf.as_mut_packet().copy_from_slice(&bytes);
                 }
             }
+
             if !tx.is_empty() {
                 // Count accepted bytes before send empties those handles.
                 let lens: usize = tx.iter().map(PacketBuf::len).sum();
@@ -307,6 +327,7 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
                 tx.drain(..sent); // keep and retry suffix, bounded by batch
                 work += sent;
             }
+
             if args.action != "tx" || args.backend == "loopback" {
                 // Preserve replies under backpressure before receiving more.
                 if tx.is_empty() {
@@ -340,6 +361,7 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
                 }
             }
         }
+
         if !warmup {
             let elapsed = start.elapsed().as_secs_f64();
             measured = json!({"elapsed_seconds": elapsed, "rx_packets": rx_packets, "rx_bytes": rx_bytes,
@@ -350,22 +372,26 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
                 "unsent_at_end": tx.len(), "pending_tx_at_end": dev.pending_tx() });
         }
     }
+
     let after = dev.details();
     let drain = Instant::now() + Duration::from_millis(250);
     while dev.pending_tx() > 0 && Instant::now() < drain {
         dev.progress()?;
     }
+
     latencies.sort_unstable();
     let percentile = |q: usize| {
         latencies
             .get((latencies.len().saturating_sub(1) * q) / 100)
             .copied()
     };
+
     let kernel = std::process::Command::new("uname")
         .arg("-sr")
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
     println!(
         "{}",
         json!({"backend": args.backend, "action": args.action, "kernel": kernel,
@@ -380,5 +406,6 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
         "pending_tx_after_drain": dev.pending_tx(),
         "batch_service_ns": {"samples": latencies.len(), "p50": percentile(50), "p99": percentile(99)} })
     );
+
     Ok(())
 }

@@ -47,7 +47,6 @@ impl Default for Stats {
 
 fn main() -> Result<(), Box<dyn StdError>> {
     let args: Vec<String> = env::args().collect();
-
     let mode = flag(&args, "--mode").unwrap_or_else(|| "plain".to_string());
     let shards: usize = flag(&args, "--shards")
         .map(|s| s.parse().expect("--shards must be an integer"))
@@ -72,6 +71,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
             std::process::exit(2);
         }
     }
+
     Ok(())
 }
 
@@ -86,9 +86,9 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 fn run_plain(duration: Duration) -> Result<(), Box<dyn StdError>> {
     #[cfg(target_os = "macos")]
     let mut dev = DefaultDevice::new(0)?; // unit 0 = next available utun
+
     #[cfg(target_os = "linux")]
     let mut dev = DefaultDevice::new("tun0")?;
-
     println!(
         "plain: RX-drop on {} (mtu {} bytes)",
         dev.name()?,
@@ -116,6 +116,7 @@ fn run_plain(duration: Duration) -> Result<(), Box<dyn StdError>> {
         for buf in frames.iter() {
             bytes += buf.len() as u64;
         }
+
         frames.clear(); // RX-drop baseline; use echo_server for actual replies.
         packets += n as u64;
 
@@ -131,6 +132,7 @@ fn run_plain(duration: Duration) -> Result<(), Box<dyn StdError>> {
             break;
         }
     }
+
     Ok(())
 }
 
@@ -182,6 +184,7 @@ fn run_reactor(shards: usize, duration: Duration) -> Result<(), Box<dyn StdError
 
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(200));
+
         let dt = last.elapsed().as_secs_f64();
         if dt >= 1.0 {
             let p = stats.packets.load(Ordering::Relaxed);
@@ -196,6 +199,7 @@ fn run_reactor(shards: usize, duration: Duration) -> Result<(), Box<dyn StdError
     runner
         .join()
         .map_err(|_| io::Error::other("reactor worker thread panicked"))??;
+
     if let Some(handle) = stopper {
         handle.join().unwrap();
     }

@@ -3,11 +3,13 @@ use async_net_stack_rs::{
     api::{Action, Service, UdpPool},
     simulation::{Link, Network},
 };
+
 use clap::Parser;
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
     time::{Duration, Instant},
 };
+
 #[derive(Parser)]
 struct Args {
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=200))]
@@ -23,11 +25,13 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     reorder_us: u64,
 }
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     if args.batch == 0 || args.batch > 256 {
         return Err("batch must be 1..=256".into());
     }
+
     let network = Network::default();
     let client_addr = SocketAddrV4::new(Ipv4Addr::new(10, 77, 0, 1), 8000);
     let client_dev = network.port(&[*client_addr.ip()], 1024, 256)?;
@@ -35,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..args.workers {
         let address = SocketAddrV4::new(Ipv4Addr::new(10, 77, 0, i + 2), 9000);
         let device = network.port(&[*address.ip()], 256, 64)?;
+
         // Only worker -> client is impaired: isolate response incast.
         network.set_link(
             &device,
@@ -50,11 +55,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         worker.bind(Service { address, id: 7 })?;
         workers.push(worker);
     }
+
     let mut client = UdpPool::new(client_dev, 256, args.workers as usize)?;
     client.bind(Service {
         address: client_addr,
         id: 0,
     })?;
+
     let lease = Duration::from_secs(3600);
     // Retry discovery to tolerate deterministic response loss.
     for _ in 0..3 {
@@ -64,15 +71,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             worker.poll(network.now(), lease, 256, |_| Action::Echo)?;
             worker.flush()?;
         }
+
         network.advance(Duration::from_micros(
             args.delay_us.saturating_add(args.reorder_us),
         ))?;
+
         client.poll(network.now(), lease, 256, |_| Action::Ignore)?;
     }
+
     let peers: Vec<_> = client.peers().map(|p| p.service.address).collect();
     if peers.is_empty() {
         return Err("no peers discovered (try less discovery loss)".into());
     }
+
     let started = Instant::now();
     let mut sent = 0u64;
     let mut received = 0u64;
@@ -90,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
         client.poll(network.now(), lease, 256, |d| {
             let sequence = u64::from_be_bytes(d.payload[..8].try_into().unwrap());
             if sequence < highest {
@@ -104,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         network.advance(Duration::from_micros(100))?;
     }
+
     let elapsed = started.elapsed().as_secs_f64();
     println!(
         "{}",
@@ -112,5 +125,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "out_of_order":reordered, "wall_seconds":elapsed, "replies_per_second":received as f64/elapsed,
         "simulated_seconds":network.now().as_secs_f64(), "fabric":format!("{:?}",network.stats())})
     );
+
     Ok(())
 }

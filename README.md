@@ -41,6 +41,18 @@ sudo ./scripts/linux-pool-lab.sh --window 256
 See the [network behavior lab](docs/network-lab.md) for the APIs, kernel queue and
 netem experiments, measurement limits and reproducible fault semantics.
 
+`simulation::AccessPoint` adds an isolated, application-owned AP lifecycle model:
+explicit association, broadcast discovery, teardown that purges in-flight traffic,
+and restart requiring reassociation. This is an IPv4 connectivity model, not a
+Wi-Fi radio emulator. Try `cargo run --locked --example ap_lifecycle`; see the
+[AP lifecycle lab](docs/ap-lifecycle.md) for expected output, manual checks and
+the roadmap toward ICMP probes, TCP and Linux virtual Wi-Fi.
+
+The [Linux Wi-Fi lab](docs/wifi-lab.md) adds real Linux association over built-in
+`mac80211_hwsim` radios, WPA2, UDP discovery and TCP echo in isolated namespaces.
+Use `python3 scripts/qemu-lab.py --rebuild --test wifi` with your existing builder
+arguments to rebuild the kernel/initramfs and launch it.
+
 ## Start testing
 
 ```sh

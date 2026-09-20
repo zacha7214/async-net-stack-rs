@@ -2,7 +2,8 @@
 """Run on ARM64 Linux: build an isolated kernel and self-contained lab initramfs.
 
 Needs gcc, make, flex, bison, bc, libssl-dev, libelf-dev, busybox-static, cpio,
-binutils, Python 3, and Rust/Cargo. Does not install/reboot the builder's kernel.
+binutils, Python 3, Rust/Cargo, iproute2, iw, hostapd and wpasupplicant.
+Does not install/reboot the builder's kernel.
 """
 import argparse
 import datetime
@@ -14,6 +15,8 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
+import sysconfig
 import tempfile
 
 
@@ -34,6 +37,57 @@ def output(args, **kw):
     return subprocess.check_output(list(map(str, args)), text=True, **kw).strip()
 
 
+def copy_runtime(root, executable, destination):
+    """Copy a trusted builder executable/shared object and its ELF dependencies."""
+    dest = root / str(destination).lstrip('/')
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Busybox installed an applet symlink at some of these paths (notably ip).
+    if dest.is_symlink():
+        dest.unlink()
+    shutil.copy2(Path(executable).resolve(), dest)
+    if 'INTERP' not in output(['readelf', '-l', executable]) and not str(executable).endswith('.so'):
+        return
+    libs = output(['ldd', executable])
+    if 'not found' in libs:
+        raise RuntimeError(f'missing runtime dependency for {executable}: {libs}')
+    for line in libs.splitlines():
+        for word in line.split():
+            if word.startswith('/'):
+                lib = Path(word)
+                target = root / str(lib).lstrip('/')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(lib.resolve(), target)
+
+
+def wifi_runtime(root, project):
+    for name in ('ip', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli'):
+        copy_runtime(root, shutil.which(name), '/bin/'+name)
+    copy_runtime(root, sys.executable, '/bin/python3')
+    stdlib = Path(sysconfig.get_path('stdlib'))
+    target = root / str(stdlib).lstrip('/')
+    shutil.copytree(stdlib, target, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('__pycache__', 'site-packages',
+                                                 'dist-packages', 'test', 'tests'))
+    for extension in target.rglob('*.so'):
+        # Resolve dependencies against the builder's corresponding original.
+        original = stdlib / extension.relative_to(target)
+        copy_runtime(root, original, '/'+str(extension.relative_to(root)))
+    shutil.copy2(project/'scripts/linux-wifi-lab.py', root/'bin/linux-wifi-lab.py')
+    # Preserve the builder interpreter's prefix even though the executable is /bin.
+    import shlex
+    (root/'bin/wifi-lab').write_text('#!/bin/sh\nexport PYTHONHOME='+shlex.quote(sys.base_prefix)+
+                                    '\nexec /bin/python3 /bin/linux-wifi-lab.py "$@"\n')
+    (root/'bin/wifi-lab').chmod(0o755)
+    for name in ('regulatory.db', 'regulatory.db.p7s'):
+        for directory in ('/lib/firmware', '/usr/lib/firmware'):
+            src = Path(directory)/name
+            if src.is_file():
+                dest = root/'lib/firmware'/name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                break
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source', required=True, type=Path)
@@ -51,8 +105,11 @@ def main():
     marker = work / '.async-net-kernel-lab'
     if not marker.exists() and any(work.iterdir()): p.error('work is nonempty and not owned by this helper')
     marker.touch()
-    for tool in ('make', 'gcc', 'flex', 'bison', 'bc', 'cpio', 'nm', 'readelf', 'busybox', 'cargo'):
-        if not shutil.which(tool): p.error(f'missing prerequisite: {tool}')
+    for tool in ('make', 'gcc', 'flex', 'bison', 'bc', 'cpio', 'nm', 'readelf', 'busybox', 'cargo',
+                 'ip', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli'):
+        if not shutil.which(tool):
+            p.error(f'missing prerequisite: {tool}; Wi-Fi tools: '
+                    'sudo apt-get install iproute2 iw hostapd wpasupplicant wireless-regdb')
     busybox = Path(shutil.which('busybox')).resolve()
     if 'INTERP' in output(['readelf', '-l', busybox]): p.error('install busybox-static first')
     if (source / '.config').exists(): p.error('source has an in-tree .config; use a clean source checkout for O= builds')
@@ -68,7 +125,8 @@ def main():
                 'BINFMT_ELF', 'BINFMT_SCRIPT', 'DEVTMPFS', 'PROC_FS', 'SYSFS',
                 'FUTEX', 'MULTIUSER', 'BPF_SYSCALL', 'BPF_JIT', 'XDP_SOCKETS',
                 'VIRTIO_PCI', 'VIRTIO_NET', 'PROC_PAGE_MONITOR', 'DEBUG_INFO',
-                'DEBUG_INFO_DWARF4', 'GDB_SCRIPTS', 'KALLSYMS')
+                'DEBUG_INFO_DWARF4', 'GDB_SCRIPTS', 'KALLSYMS', 'NAMESPACES', 'NET_NS',
+                'CFG80211', 'MAC80211', 'MAC80211_HWSIM', 'PACKET')
     missing = [s for s in required if f'CONFIG_{s}=y\n' not in config]
     if missing: raise RuntimeError(f'Kconfig did not enable required options: {missing}')
     for s in ('RANDOMIZE_BASE', 'MODULES', 'DEBUG_INFO_REDUCED', 'DEBUG_INFO_SPLIT'):
@@ -102,23 +160,16 @@ def main():
     run(['readelf', '-S', build/'vmlinux'], stdout=(bundle/'elf-sections.txt').open('w'))
     with tempfile.TemporaryDirectory(prefix='initramfs-', dir=work) as name:
         root = Path(name)
-        for d in ('bin', 'sbin', 'dev', 'proc', 'sys', 'tmp', 'run', 'etc'):
+        for d in ('bin', 'sbin', 'dev', 'proc', 'sys', 'tmp', 'run', 'etc', 'var'):
             (root/d).mkdir()
+        (root/'var/run').symlink_to('/run')
         shutil.copy2(busybox, root/'bin/busybox')
         for applet in output([busybox, '--list']).splitlines():
             if applet != 'busybox': (root/'bin'/applet).symlink_to('busybox')
         (root/'sbin/poweroff').symlink_to('/bin/busybox')
         receiver = work/'cargo-target/release/examples/xdp_vm_rx'
-        shutil.copy2(receiver, root/'bin/xdp_vm_rx')
-        # ldd is used only on our freshly built executable. Preserve loader paths.
-        libs = output(['ldd', receiver])
-        for line in libs.splitlines():
-            for word in line.split():
-                if word.startswith('/'):
-                    lib = Path(word)
-                    dest = root/str(lib).lstrip('/')
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(lib.resolve(), dest)
+        copy_runtime(root, receiver, '/bin/xdp_vm_rx')
+        wifi_runtime(root, project)
         shutil.copy2(project/'scripts/kernel-lab-init.sh', root/'init')
         (root/'init').chmod(0o755)
         names = b'\0'.join(str(f.relative_to(root)).encode() for f in sorted(root.rglob('*'))) + b'\0'
@@ -135,7 +186,8 @@ def main():
                     source_commit=output(['git', '-C', source, 'rev-parse', 'HEAD']),
                     source_status=output(['git', '-C', source, 'status', '--short']),
                     compiler=output(['gcc', '--version']).splitlines()[0], symbols=symbols,
-                    cmdline='console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr loglevel=8 panic=0',
+                    features=['wifi-hwsim'],
+                    cmdline='console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr loglevel=8 panic=0 mac80211_hwsim.radios=2',
                     sha256={f.name: hashlib.sha256(f.read_bytes()).hexdigest()
                             for f in bundle.iterdir() if f.is_file()})
     (bundle/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')

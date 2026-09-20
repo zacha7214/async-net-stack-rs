@@ -6,6 +6,7 @@ use async_net_stack_rs::device::{DefaultDevice, Device, PacketBuf};
 use async_net_stack_rs::net::{LinkLayer, Responder};
 use std::error::Error;
 use std::os::fd::AsRawFd;
+
 fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "macos")]
     let mut dev = DefaultDevice::new(0)?;
@@ -15,11 +16,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         "{}: stack IP 10.9.0.2, ICMP echo and UDP port 9000",
         dev.name()?
     );
+
     let responder = Responder {
         ipv4: [10, 9, 0, 2],
         mac: [0; 6],
         udp_port: Some(9000),
     };
+
     let mut rx: Vec<PacketBuf> = Vec::with_capacity(64);
     let mut tx = Vec::with_capacity(64);
     loop {
@@ -27,6 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let sent = dev.send(&mut tx)?;
             tx.drain(..sent);
         }
+
         if tx.is_empty() {
             dev.recv(64, &mut rx)?;
             for mut packet in rx.drain(..) {
@@ -35,6 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+
         if tx.is_empty() {
             let mut pfd = libc::pollfd {
                 fd: dev.as_raw_fd(),

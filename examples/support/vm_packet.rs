@@ -21,12 +21,15 @@ pub fn header(
     h[40..48].copy_from_slice(&session.to_le_bytes());
     h
 }
+
 pub fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
+
 pub fn payload_byte(sequence: u64, offset: usize) -> u8 {
     (sequence.rotate_right(((offset & 7) * 8) as u32) as u8) ^ (offset / 8) as u8
 }
+
 pub fn identify(bytes: &[u8], kind: &[u8; 2]) -> bool {
     bytes.len() >= HEADER && bytes[12..14] == [0x88, 0xb5] && &bytes[14..16] == kind
 }

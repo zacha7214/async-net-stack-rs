@@ -46,12 +46,14 @@ struct Args {
     #[arg(long)]
     trace_control: bool,
 }
+
 struct Session {
     id: u64,
     target: u64,
     generated: u64,
     start: Instant,
 }
+
 struct Backend {
     memory: Memory,
     queues: [Queue; 2],
@@ -69,6 +71,7 @@ struct Backend {
     queue_stops: u64,
     spans: Vec<Span>,
 }
+
 impl Backend {
     fn new() -> Self {
         Self {
@@ -89,6 +92,7 @@ impl Backend {
             spans: Vec::with_capacity(64),
         }
     }
+
     fn handle(&mut self, mut m: Message, wire: &mut Wire, trace: bool) -> Result<()> {
         if trace {
             eprintln!(
@@ -98,6 +102,7 @@ impl Backend {
                 m.fds.len()
             );
         }
+
         let mut reply = None;
         match m.request {
             1 => {
@@ -161,6 +166,7 @@ impl Backend {
                 if n == 0 || n > 8 || u32_at(&m.body, 4) != 0 {
                     return Err(bad("memory table needs 1..=8 regions"));
                 }
+
                 m.check(8 + n * 32, n)?;
                 let mut regions = Vec::with_capacity(n);
                 for (i, fd) in m.fds.drain(..).enumerate() {
@@ -173,6 +179,7 @@ impl Backend {
                         u64_at(&m.body, p + 24),
                     )?);
                 }
+
                 self.memory.replace(regions)?;
                 self.pending_miss = None;
                 println!("{}", json!({"event":"memory", "regions":n}));
@@ -291,13 +298,16 @@ impl Backend {
             }
             _ => return Err(bad(format!("unsupported vhost-user request {}", m.request))),
         }
+
         if let Some(body) = reply {
             wire.send(m.request, true, &body)?;
         } else if m.flags & 8 != 0 {
             wire.send(m.request, true, &0u64.to_ne_bytes())?;
         }
+
         Ok(())
     }
+
     fn fault(&mut self, fault: Fault) -> Result<()> {
         match fault {
             Fault::Invalid(reason) => Err(bad(reason)),
@@ -318,6 +328,7 @@ impl Backend {
                 if self.protocol & PROTOCOL & ((1 << 3) | (1 << 5)) != ((1 << 3) | (1 << 5)) {
                     return Err(bad("IOTLB requires BACKEND_REQ and REPLY_ACK"));
                 }
+
                 let mut b = [0u8; 32];
                 b[..8].copy_from_slice(&address.to_ne_bytes());
                 b[24] = permission;
@@ -327,6 +338,7 @@ impl Backend {
                     .ok_or_else(|| bad("missing backend-request fd"))?
                     .send(1, false, &b)?;
                 self.pending_miss = Some((address, permission, Instant::now()));
+
                 Ok(())
             }
         }
@@ -335,6 +347,7 @@ impl Backend {
         if !self.queues[1].running() {
             return Ok(0);
         }
+
         let rings = match self.queues[1].map(&self.memory) {
             Ok(r) => r,
             Err(e) => {
@@ -342,6 +355,7 @@ impl Backend {
                 return Ok(0);
             }
         };
+
         let mut completed = 0;
         let mut fault = None;
         for _ in 0..a.batch {
@@ -353,6 +367,7 @@ impl Backend {
                     break;
                 }
             };
+
             let mut h = [0; vm_packet::HEADER];
             if read_scatter(&self.spans, 12, &mut h) {
                 let id = vm_packet::u64_at(&h, 40);
@@ -382,9 +397,11 @@ impl Backend {
                     self.session = None;
                 }
             }
+
             self.queues[1].complete(rings, head, 0);
             completed += 1;
         }
+
         if completed != 0 {
             self.queues[1].publish(rings)?;
             self.tx_completed += completed as u64;
@@ -394,19 +411,23 @@ impl Backend {
         }
         Ok(completed)
     }
+
     fn rx(&mut self, a: &Args) -> Result<usize> {
         if !self.queues[0].running() || !self.queues[0].enabled || self.session.is_none() {
             return Ok(0);
         }
+
         let s = self.session.as_ref().unwrap();
         let allowed = if a.pps == 0 {
             s.target
         } else {
             ((s.start.elapsed().as_secs_f64() * a.pps as f64) as u64 + 1).min(s.target)
         };
+
         if s.generated >= allowed {
             return Ok(0);
         }
+
         let rings = match self.queues[0].map(&self.memory) {
             Ok(r) => r,
             Err(e) => {
@@ -414,6 +435,7 @@ impl Backend {
                 return Ok(0);
             }
         };
+
         let mut completed = 0;
         let mut fault = None;
         for _ in 0..a.batch {
@@ -421,6 +443,7 @@ impl Backend {
             if s.generated >= allowed {
                 break;
             }
+
             let head = match self.queues[0].peek(&self.memory, rings, true, &mut self.spans) {
                 Ok(Some(h)) => h,
                 Ok(None) => break,
@@ -429,11 +452,13 @@ impl Backend {
                     break;
                 }
             };
+
             if self.spans.iter().map(|s| s.len).sum::<usize>() < a.size + 12 {
                 return Err(bad(
                     "guest RX chain too short; use MTU 1500 and disable mergeable buffers/offloads",
                 ));
             }
+
             let frame_gpa =
                 frame_gpa(&self.spans).ok_or_else(|| bad("missing packet data span"))?;
             let header = vm_packet::header(*b"VD", s.generated, frame_gpa, a.size, s.id);
@@ -444,17 +469,21 @@ impl Backend {
                     json!({"event":"rx_sample", "session":s.id, "sequence":s.generated, "frame_gpa":format!("{frame_gpa:#x}"), "descriptor_head":head, "segments":self.spans.len()})
                 );
             }
+
             self.queues[0].complete(rings, head, (a.size + 12) as u32);
             self.session.as_mut().unwrap().generated += 1;
             completed += 1;
         }
+
         if completed != 0 {
             self.queues[0].publish(rings)?;
             self.rx_completed += completed as u64;
         }
+
         if let Some(e) = fault {
             self.fault(e)?;
         }
+
         if let Some(s) = &self.session {
             if s.generated == s.target {
                 println!(
@@ -464,9 +493,11 @@ impl Backend {
                 self.session = None;
             }
         }
+
         Ok(completed)
     }
 }
+
 fn frame_gpa(spans: &[Span]) -> Option<u64> {
     let mut skip = 12;
     for s in spans {

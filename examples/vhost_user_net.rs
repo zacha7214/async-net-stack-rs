@@ -4,6 +4,7 @@
 mod backend;
 #[path = "support/vm_packet.rs"]
 mod vm_packet;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend::main()
 }
