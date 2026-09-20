@@ -29,7 +29,7 @@ def main():
     p.add_argument('--no-lab-nic', action='store_true',
                    help='boot the kernel alone: no vhost-user backend, no lab NIC, stock QEMU')
     p.add_argument('--accel', choices=['hvf', 'kvm', 'tcg'], default='tcg')
-    p.add_argument('--mode', choices=['shell', 'zero-copy', 'copy'], default='shell')
+    p.add_argument('--mode', choices=['shell', 'zero-copy', 'copy', 'wifi'], default='shell')
     p.add_argument('--packets', type=int, default=10000)
     p.add_argument('--pps', type=int, default=1000)
     p.add_argument('--debug', action='store_true')
@@ -39,8 +39,10 @@ def main():
     a = p.parse_args()
     bundle, qemu, backend = a.bundle.resolve(), a.qemu.resolve(), a.backend.resolve()
     if a.debug and a.accel != 'tcg': p.error('early debug uses --accel tcg')
-    if a.no_lab_nic and a.mode != 'shell':
-        p.error('--no-lab-nic has no lab NIC, so only --mode shell is available')
+    if a.no_lab_nic and a.mode not in ('shell', 'wifi'):
+        p.error('--no-lab-nic supports --mode shell or wifi')
+    if a.mode == 'wifi' and not a.no_lab_nic:
+        p.error('--mode wifi requires --no-lab-nic')
     if not 1 <= a.packets <= 1_000_000_000 or not 0 <= a.pps <= 100_000_000:
         p.error('invalid packet count/rate')
     if not 1024 <= a.gdb_port <= 65535: p.error('invalid GDB port')
@@ -49,6 +51,8 @@ def main():
                 ' (or pass --no-lab-nic to boot the kernel without it)')
     if not os.access(qemu, os.X_OK): p.error('--qemu is not executable')
     manifest = json.loads((bundle/'manifest.json').read_text())
+    if a.mode == 'wifi' and 'wifi-hwsim' not in manifest.get('features', []):
+        p.error('bundle has no Wi-Fi userspace; rebuild it first')
     for name in ('Image', 'initramfs.cpio.gz', 'vmlinux', 'config'):
         digest = hashlib.file_digest((bundle/name).open('rb'), 'sha256').hexdigest()
         if digest != manifest['sha256'][name]: p.error(f'bundle checksum mismatch: {name}')
@@ -95,10 +99,18 @@ def main():
             code = vm.wait(timeout=a.timeout or None)
         except subprocess.TimeoutExpired:
             # Reaching --timeout is the normal end of an unattended shell-mode run.
+            if a.mode != 'shell':
+                raise RuntimeError(f'guest test timed out; inspect {run}/guest-console.log')
             print(f'\nReached --timeout after {a.timeout}s; stopping the VM.', flush=True)
             return
         # A debug session usually ends by quitting QEMU, which is not a lab failure.
         if code and not a.debug: raise RuntimeError(f'QEMU exited {code}; inspect {run}')
+        if a.mode == 'wifi':
+            console = (run/'guest-console.log').read_text(errors='replace')
+            print(console, flush=True)
+            if 'KERNEL_LAB_WIFI_RESULT=0' not in console:
+                raise RuntimeError('guest Wi-Fi lab failed; inspect '+str(run/'guest-console.log'))
+            return
         if a.mode != 'shell':
             console = (run/'guest-console.log').read_text(errors='replace')
             records = []

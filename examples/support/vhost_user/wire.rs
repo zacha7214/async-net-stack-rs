@@ -11,6 +11,7 @@ pub struct Message {
     pub body: Vec<u8>,
     pub fds: Vec<OwnedFd>,
 }
+
 impl Message {
     pub fn check(&self, bytes: usize, fds: usize) -> Result<()> {
         if self.body.len() != bytes || self.fds.len() != fds {
@@ -24,9 +25,11 @@ impl Message {
         Ok(())
     }
 }
+
 pub fn u32_at(b: &[u8], n: usize) -> u32 {
     u32::from_ne_bytes(b[n..n + 4].try_into().unwrap())
 }
+
 pub fn u64_at(b: &[u8], n: usize) -> u64 {
     u64::from_ne_bytes(b[n..n + 8].try_into().unwrap())
 }
@@ -42,6 +45,7 @@ pub struct Wire {
     sent: usize,
     pub eof: bool,
 }
+
 impl Wire {
     pub fn new(stream: UnixStream) -> Result<Self> {
         stream.set_nonblocking(true)?;
@@ -57,9 +61,11 @@ impl Wire {
             eof: false,
         })
     }
+
     pub fn wants_write(&self) -> bool {
         !self.outgoing.is_empty()
     }
+
     pub fn send(&mut self, request: u32, reply: bool, body: &[u8]) -> Result<()> {
         if body.len() > 4096 || self.outgoing.len() >= 64 {
             return Err(bad("control output queue full"));
@@ -72,6 +78,7 @@ impl Wire {
         self.outgoing.push_back(bytes);
         self.flush()
     }
+
     pub fn flush(&mut self) -> Result<()> {
         while let Some(bytes) = self.outgoing.front() {
             match self.stream.write(&bytes[self.sent..]) {
@@ -88,6 +95,7 @@ impl Wire {
         }
         Ok(())
     }
+
     pub fn receive(&mut self) -> Result<Option<Message>> {
         loop {
             if self.header_have == 12 && self.body_have == self.body.len() {
@@ -96,6 +104,7 @@ impl Wire {
                 if flags & !9 != 0 || flags & 3 != 1 {
                     return Err(bad("bad vhost-user request flags/version"));
                 }
+
                 self.header_have = 0;
                 self.body_have = 0;
                 return Ok(Some(Message {
@@ -105,16 +114,19 @@ impl Wire {
                     fds: std::mem::take(&mut self.fds),
                 }));
             }
+
             let header = self.header_have < 12;
             let target = if header {
                 &mut self.header[self.header_have..]
             } else {
                 &mut self.body[self.body_have..]
             };
+
             let mut iov = libc::iovec {
                 iov_base: target.as_mut_ptr().cast(),
                 iov_len: target.len(),
             };
+
             // usize storage gives cmsghdr the required native alignment.
             let mut ancillary = [0usize; 64];
             let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
@@ -133,6 +145,7 @@ impl Wire {
                 }
                 return Err(e.into());
             }
+
             // Collect ownership before rejecting truncation or an unexpected
             // control message, so every received fd is closed on error.
             let mut unexpected = false;
@@ -158,17 +171,20 @@ impl Wire {
                     c = libc::CMSG_NXTHDR(&msg, c);
                 }
             }
+
             if unexpected
                 || msg.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
                 || self.fds.len() > 8
             {
                 return Err(bad("unexpected/truncated ancillary data or too many fds"));
             }
+
             for fd in &self.fds {
                 if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
                     return Err(io::Error::last_os_error().into());
                 }
             }
+
             if n == 0 {
                 self.eof = true;
                 if self.header_have != 0 || self.body_have != 0 || !self.fds.is_empty() {
@@ -176,6 +192,7 @@ impl Wire {
                 }
                 return Ok(None);
             }
+
             if header {
                 self.header_have += n as usize;
                 if self.header_have == 12 {

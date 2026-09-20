@@ -26,8 +26,10 @@ fn discovery_transfer_partition_and_expiry() {
         })
         .unwrap();
     }
+
     net.set_link(&a, pool.device_mut(), Link::default())
         .unwrap();
+
     let mut client = UdpPool::new(a, 8, 8).unwrap();
     client
         .bind(Service {
@@ -39,16 +41,19 @@ fn discovery_transfer_partition_and_expiry() {
         .discover(addr(1), SocketAddrV4::new(Ipv4Addr::BROADCAST, 9000), 7)
         .unwrap();
     client.flush().unwrap();
+
     pool.poll(net.now(), LEASE, 8, |_| panic!("discovery reached handler"))
         .unwrap();
     pool.flush().unwrap();
     client
         .poll(net.now(), LEASE, 8, |_| panic!("advert reached handler"))
         .unwrap();
+
     assert_eq!(client.peers().count(), 2);
     for n in [2, 3] {
         client.send_to(addr(1), addr(n), b"odd").unwrap();
     }
+
     client.flush().unwrap();
     pool.poll(net.now(), LEASE, 8, |_| Action::Echo).unwrap();
     pool.flush().unwrap();
@@ -60,6 +65,7 @@ fn discovery_transfer_partition_and_expiry() {
             Action::Ignore
         })
         .unwrap();
+
     assert_eq!(received, vec![addr(2), addr(3)]);
     net.set_link(
         client.device_mut(),
@@ -70,6 +76,7 @@ fn discovery_transfer_partition_and_expiry() {
         },
     )
     .unwrap();
+
     client.send_to(addr(1), addr(2), b"lost").unwrap();
     client.flush().unwrap();
     assert_eq!(pool.poll(net.now(), LEASE, 8, |_| panic!()).unwrap(), 0);
@@ -79,8 +86,10 @@ fn discovery_transfer_partition_and_expiry() {
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)
         .unwrap();
     assert_eq!(client.peers().count(), 0);
+
     net.set_link(client.device_mut(), pool.device_mut(), Link::default())
         .unwrap();
+
     client.send_to(addr(1), addr(2), b"healed").unwrap();
     client.flush().unwrap();
     assert_eq!(pool.poll(net.now(), LEASE, 8, |_| Action::Echo).unwrap(), 1);
@@ -100,6 +109,7 @@ fn delayed_reorder_and_partial_send_preserve_ownership() {
         },
     )
     .unwrap();
+
     let mut tx = Vec::new();
     for n in 0..3 {
         let mut f = a.alloc().unwrap();
@@ -113,9 +123,11 @@ fn delayed_reorder_and_partial_send_preserve_ownership() {
         .unwrap();
         tx.push(f);
     }
+
     assert_eq!(a.send(&mut tx).unwrap(), 2);
     assert!(tx[0].is_empty());
     assert_eq!(parse_ipv4(tx[2].as_slice()).unwrap().payload, &[2]);
+
     let mut rx = Vec::new();
     assert_eq!(b.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(parse_ipv4(rx[0].as_slice()).unwrap().payload, &[0]);
@@ -123,10 +135,12 @@ fn delayed_reorder_and_partial_send_preserve_ownership() {
     assert_eq!(b.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(parse_ipv4(rx[0].as_slice()).unwrap().payload, &[2]);
     net.advance(Duration::from_millis(10)).unwrap();
+
     assert_eq!(b.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(parse_ipv4(rx[0].as_slice()).unwrap().payload, &[1]);
     drop(a);
     drop(b);
+
     assert_eq!(parse_ipv4(rx[0].as_slice()).unwrap().payload, &[1]);
 }
 
@@ -143,9 +157,11 @@ fn malformed_udp_and_truncations_are_rejected() {
         0,
     )
     .unwrap();
+
     for n in 0..f.len() {
         assert!(parse_ipv4(&f.as_slice()[..n]).is_err());
     }
+
     f.as_mut_packet()[28] ^= 1;
     assert!(parse_ipv4(f.as_slice()).is_err());
 }
@@ -164,6 +180,7 @@ fn mtu_loss_queue_bounds_and_monotonic_clock() {
         },
     )
     .unwrap();
+
     let mut client = UdpPool::new(a, 2, 1).unwrap();
     client
         .bind(Service {
@@ -171,6 +188,7 @@ fn mtu_loss_queue_bounds_and_monotonic_clock() {
             id: 0,
         })
         .unwrap();
+
     client.send_to(addr(1), addr(2), b"large").unwrap();
     client.send_to(addr(1), addr(2), b"large").unwrap();
     assert_eq!(
@@ -180,6 +198,7 @@ fn mtu_loss_queue_bounds_and_monotonic_clock() {
             .kind(),
         std::io::ErrorKind::WouldBlock
     );
+
     assert_eq!(client.flush().unwrap(), 2);
     assert_eq!(net.stats().fault_drops, 2);
     net.set_link(
@@ -191,13 +210,16 @@ fn mtu_loss_queue_bounds_and_monotonic_clock() {
         },
     )
     .unwrap();
+
     for _ in 0..2 {
         client.send_to(addr(1), addr(2), b"ok").unwrap();
     }
     client.flush().unwrap();
+
     let mut rx = Vec::new();
     assert_eq!(b.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(net.stats().fault_drops, 3);
+
     client.poll(LEASE, LEASE, 8, |_| Action::Ignore).unwrap();
     assert!(client
         .poll(Duration::ZERO, LEASE, 8, |_| Action::Ignore)
@@ -224,6 +246,7 @@ fn broadcast_congestion_does_not_duplicate_other_recipients() {
         tx.push(f);
     }
     assert_eq!(a.send(&mut tx).unwrap(), 2);
+
     let mut rx = Vec::new();
     assert_eq!(b.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(c.recv(8, &mut rx).unwrap(), 2);
@@ -248,6 +271,7 @@ fn peer_capacity_refresh_and_response_saturation_are_observable() {
         1,
     )
     .unwrap();
+
     for n in [2, 3] {
         worker
             .bind(Service {
@@ -256,19 +280,23 @@ fn peer_capacity_refresh_and_response_saturation_are_observable() {
             })
             .unwrap();
     }
+
     client
         .discover(addr(1), SocketAddrV4::new(Ipv4Addr::BROADCAST, 9000), 7)
         .unwrap();
     client.flush().unwrap();
+
     worker
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)
         .unwrap();
     assert_eq!(worker.stats().response_drops, 1);
     worker.flush().unwrap();
+
     client
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)
         .unwrap();
     assert_eq!(client.peers().count(), 1);
+
     net.advance(Duration::from_millis(500)).unwrap();
     client.discover(addr(1), addr(2), 7).unwrap();
     client.flush().unwrap();
@@ -276,10 +304,12 @@ fn peer_capacity_refresh_and_response_saturation_are_observable() {
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)
         .unwrap();
     worker.flush().unwrap();
+
     client
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)
         .unwrap();
     assert_eq!(client.peers().next().unwrap().last_seen, net.now());
+
     client.discover(addr(1), addr(3), 7).unwrap();
     client.flush().unwrap();
     worker
@@ -290,6 +320,7 @@ fn peer_capacity_refresh_and_response_saturation_are_observable() {
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)
         .unwrap();
     assert_eq!(client.stats().peer_overflow, 1);
+
     net.advance(Duration::from_millis(600)).unwrap();
     client
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)

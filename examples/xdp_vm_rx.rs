@@ -2,6 +2,7 @@
 #[cfg(target_os = "linux")]
 #[path = "support/vm_packet.rs"]
 mod vm_packet;
+
 #[cfg(target_os = "linux")]
 mod guest {
     use super::vm_packet;
@@ -13,6 +14,7 @@ mod guest {
     use std::os::unix::fs::FileExt;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
     #[derive(Parser)]
     struct Args {
         #[arg(long)]
@@ -31,6 +33,7 @@ mod guest {
         #[arg(long)]
         skip_address_check: bool,
     }
+
     fn physical_address(pagemap: &File, pointer: *const u8, page: u64) -> io::Result<u64> {
         let address = pointer as u64;
         let mut raw = [0; 8];
@@ -43,6 +46,7 @@ mod guest {
         }
         Ok(pfn * page + address % page)
     }
+
     fn control(
         dev: &mut XdpDevice,
         kind: [u8; 2],
@@ -66,6 +70,7 @@ mod guest {
         }
         Ok(())
     }
+
     pub fn main() -> Result<()> {
         let a = Args::parse();
         if a.packets == 0
@@ -78,6 +83,7 @@ mod guest {
         {
             return Err("invalid count, batch, samples or timeout".into());
         }
+
         let zero = a.mode == "zero-copy";
         let cfg = XdpConfig {
             mode: if zero {
@@ -90,25 +96,30 @@ mod guest {
             headroom: 32,
             ..XdpConfig::default()
         };
+
         let mut dev = XdpDevice::with_config(&a.iface, 0, &cfg)?;
         if dev.is_zero_copy() != zero {
             return Err("kernel XDP_OPTIONS disagrees with requested mode".into());
         }
+
         let pagemap = if a.skip_address_check {
             None
         } else {
             Some(File::open("/proc/self/pagemap")?)
         };
+
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if page <= 0 {
             return Err("cannot read guest page size".into());
         }
+
         let session = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
         println!(
             "{}",
             json!({"event":"guest_ready", "session":session, "zero_copy":dev.is_zero_copy(),
             "attach":format!("{:?}", dev.attach_mode()), "page_size":page, "address_check":!a.skip_address_check})
         );
+
         control(&mut dev, *b"VS", session, a.packets, a.timeout)?;
         let mut frames: Vec<PacketBuf> = Vec::with_capacity(a.batch);
         let mut received = 0u64;
@@ -116,6 +127,7 @@ mod guest {
         let mut matched = 0usize;
         let start = Instant::now();
         let mut last = start;
+
         let result: Result<()> = (|| {
             while received < a.packets {
                 if last.elapsed() > Duration::from_secs(a.timeout) {
@@ -151,47 +163,58 @@ mod guest {
                     {
                         return Err(format!("packet {seq}: length/payload mismatch").into());
                     }
+
                     if checked < a.samples {
                         let expected = vm_packet::u64_at(b, 24);
                         let actual = pagemap
                             .as_ref()
                             .map(|p| physical_address(p, b.as_ptr(), page as u64))
                             .transpose()?;
+
                         if actual == Some(expected) {
                             matched += 1;
                         }
+
                         println!(
                             "{}",
                             json!({"event":"guest_sample", "session":session, "sequence":seq,
                             "backend_frame_gpa":format!("{expected:#x}"), "umem_frame_gpa":actual.map(|g| format!("{g:#x}")),
                             "same_frame":actual.map(|g| g == expected), "data_offset":frame.data_offset()})
                         );
+
                         if zero && actual.is_some() && actual != Some(expected) {
                             return Err(
                                 "zero-copy sample did not land in the same physical frame".into()
                             );
                         }
+
                         checked += 1;
                     }
+
                     received += 1;
                     last = Instant::now();
                 }
+
                 // Drop the application leases, then refill FILL and drive the
                 // driver's NEED_WAKEUP path. This is the final step of the lab.
                 frames.clear();
                 dev.progress();
             }
+
             Ok(())
         })();
+
         frames.clear();
         if result.is_err() {
             let _ = control(&mut dev, *b"VE", session, 0, 1);
         }
+
         let drain = Instant::now() + Duration::from_millis(250);
         while dev.pending_tx() > 0 && Instant::now() < drain {
             dev.progress();
             std::thread::yield_now();
         }
+
         let stats = dev.stats()?;
         println!(
             "{}",
@@ -204,10 +227,12 @@ mod guest {
         result
     }
 }
+
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     guest::main()
 }
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("xdp_vm_rx runs inside the Linux guest; vhost_user_net runs on the host.");

@@ -4,6 +4,9 @@
 use crate::device::{buffer_pool::FramePool, Device, PacketBuf};
 use std::{cell::RefCell, collections::BTreeMap, io, net::Ipv4Addr, rc::Rc, time::Duration};
 
+mod access_point;
+pub use access_point::AccessPoint;
+
 /// Directed link configuration, changed live to reproduce partitions/healing.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Link {
@@ -23,9 +26,12 @@ pub struct FabricStats {
     pub queue_drops: u64,
     pub unroutable: u64,
     pub backpressure: u64,
+    /// In-flight frames purged by disconnect/teardown, plus unicast to offline ports.
+    pub disconnected_drops: u64,
 }
 struct Pending {
     at: Duration,
+    source: usize,
     frame: PacketBuf,
 }
 struct Port {
@@ -33,6 +39,7 @@ struct Port {
     queue: Vec<Pending>,
     capacity: usize,
     active: bool,
+    online: bool,
 }
 #[derive(Default)]
 struct State {
@@ -41,6 +48,16 @@ struct State {
     routes: BTreeMap<Ipv4Addr, usize>,
     links: BTreeMap<(usize, usize), (Link, u64)>,
     stats: FabricStats,
+}
+impl State {
+    fn disconnect(&mut self, id: usize) {
+        self.ports[id].online = false;
+        for (target, port) in self.ports.iter_mut().enumerate() {
+            let before = port.queue.len();
+            port.queue.retain(|p| target != id && p.source != id);
+            self.stats.disconnected_drops += (before - port.queue.len()) as u64;
+        }
+    }
 }
 #[derive(Clone, Default)]
 pub struct Network(Rc<RefCell<State>>);
@@ -76,6 +93,7 @@ impl Network {
             queue: Vec::with_capacity(queue),
             capacity: queue,
             active: true,
+            online: true,
         });
         for &address in addresses {
             state.routes.insert(address, id);
@@ -121,6 +139,10 @@ pub struct SimDevice {
     id: usize,
 }
 impl SimDevice {
+    /// Model association state; ordinary Network ports start online.
+    pub fn is_online(&self) -> bool {
+        self.network.0.borrow().ports[self.id].online
+    }
     pub fn queued(&self) -> usize {
         self.network.0.borrow().ports[self.id].queue.len()
     }
@@ -128,8 +150,8 @@ impl SimDevice {
 impl Drop for SimDevice {
     fn drop(&mut self) {
         let mut state = self.network.0.borrow_mut();
+        state.disconnect(self.id);
         state.ports[self.id].active = false;
-        state.ports[self.id].queue.clear();
         state.routes.retain(|_, id| *id != self.id);
     }
 }
@@ -156,6 +178,15 @@ impl Device for SimDevice {
     }
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         let mut state = self.network.0.borrow_mut();
+        if frames.is_empty() {
+            return Ok(0);
+        }
+        if !state.ports[self.id].online {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "simulated endpoint is offline",
+            ));
+        }
         let mut accepted = 0;
         for frame in frames {
             let packet = frame.as_slice();
@@ -179,6 +210,12 @@ impl Device for SimDevice {
             if !broadcast && route.is_none() {
                 state.stats.unroutable += 1;
             }
+            if !broadcast && route.is_some_and(|id| !state.ports[id].online) {
+                state.stats.disconnected_drops += 1;
+                drop(std::mem::take(frame));
+                accepted += 1;
+                continue;
+            }
             // Congestion is checked before faults; retries do not advance the
             // fault sequence. Broadcast drops copies instead of partial retry.
             if !broadcast
@@ -189,7 +226,11 @@ impl Device for SimDevice {
             }
             let mut delivery = None;
             for target in targets {
-                if broadcast && (target == self.id || !state.ports[target].active) {
+                if broadcast
+                    && (target == self.id
+                        || !state.ports[target].active
+                        || !state.ports[target].online)
+                {
                     continue;
                 }
                 let (link, sequence) = state.links.entry((self.id, target)).or_default();
@@ -223,7 +264,11 @@ impl Device for SimDevice {
                     copy.set_headroom(0);
                     copy.set_len(packet.len());
                     copy.as_mut_packet().copy_from_slice(packet);
-                    port.queue.push(Pending { at, frame: copy });
+                    port.queue.push(Pending {
+                        at,
+                        source: self.id,
+                        frame: copy,
+                    });
                 } else {
                     delivery = Some((target, at));
                 }
@@ -231,6 +276,7 @@ impl Device for SimDevice {
             if let Some((target, at)) = delivery {
                 state.ports[target].queue.push(Pending {
                     at,
+                    source: self.id,
                     frame: std::mem::take(frame),
                 });
             }

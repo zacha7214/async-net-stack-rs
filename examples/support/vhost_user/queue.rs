@@ -21,16 +21,19 @@ pub struct Queue {
     pub notifications: u64,
     pub notification_full: u64,
 }
+
 #[derive(Clone, Copy)]
 pub struct Rings {
     desc: Span,
     avail: Span,
     used: Span,
 }
+
 impl Queue {
     pub fn running(&self) -> bool {
         self.configured && self.num != 0 && self.started
     }
+
     pub fn stop(&mut self) -> u16 {
         self.started = false;
         self.kick = None;
@@ -40,6 +43,7 @@ impl Queue {
         self.last_used = None;
         self.last_avail
     }
+
     pub fn map(&mut self, memory: &Memory) -> Access<Rings> {
         let n = self.num as usize;
         let r = Rings {
@@ -56,6 +60,7 @@ impl Queue {
         {
             return Err(invalid("misaligned/overlapping virtqueue areas"));
         }
+
         if self.last_used.is_none() {
             let used = load_index(r.used);
             if used != self.last_avail {
@@ -69,8 +74,10 @@ impl Queue {
                 r.used.ptr.cast::<u16>().write(0);
             }
         }
+
         Ok(r)
     }
+
     pub fn peek(
         &self,
         memory: &Memory,
@@ -83,9 +90,11 @@ impl Queue {
         if pending == 0 {
             return Ok(None);
         }
+
         if pending > self.num {
             return Err(invalid("avail index advanced beyond queue capacity"));
         }
+
         let slot = self.last_avail as usize & (self.num as usize - 1);
         let head = u16::from_le(unsafe { r.avail.ptr.add(4 + slot * 2).cast::<u16>().read() });
         let mut index = head;
@@ -95,11 +104,13 @@ impl Queue {
             if index >= self.num || spans.len() >= 64 {
                 return Err(invalid("descriptor index or chain length exceeds bounds"));
             }
+
             let word = index as usize / 64;
             let bit = 1u64 << (index & 63);
             if visited[word] & bit != 0 {
                 return Err(invalid("descriptor chain cycle"));
             }
+
             visited[word] |= bit;
             let mut d = [0; 16];
             r.desc.slice(index as usize * 16, 16).copy_out(&mut d);
@@ -111,12 +122,14 @@ impl Queue {
                     "unsupported descriptor flags/direction/zero length",
                 ));
             }
+
             total = total
                 .checked_add(len)
                 .ok_or_else(|| invalid("descriptor length overflow"))?;
             if total > 65536 {
                 return Err(invalid("packet chain exceeds 64 KiB"));
             }
+
             let span = memory.translate(address, len, if write { 2 } else { 1 }, false)?;
             if span.overlaps(r.desc)
                 || span.overlaps(r.avail)
@@ -125,14 +138,18 @@ impl Queue {
             {
                 return Err(invalid("packet aliases a ring or another chain segment"));
             }
+
             spans.push(span);
             if flags & 1 == 0 {
                 break;
             }
+
             index = u16::from_le_bytes(d[14..16].try_into().unwrap());
         }
+
         Ok(Some(head))
     }
+
     pub fn complete(&mut self, r: Rings, head: u16, len: u32) {
         let used = self.last_used.unwrap();
         let slot = used as usize & (self.num as usize - 1);
@@ -143,6 +160,7 @@ impl Queue {
         self.last_used = Some(used.wrapping_add(1));
         self.last_avail = self.last_avail.wrapping_add(1);
     }
+
     pub fn publish(&mut self, r: Rings) -> Result<()> {
         // Release packet bytes and used entries together. The full barrier
         // before reading interrupt suppression pairs with the driver's re-arm.
@@ -151,6 +169,7 @@ impl Queue {
                 .store(self.last_used.unwrap().to_le(), Ordering::Release);
         }
         fence(Ordering::SeqCst);
+
         let flags = u16::from_le(unsafe { r.avail.ptr.cast::<u16>().read_volatile() });
         if flags & 1 == 0 {
             if let Some(fd) = &self.call {
@@ -162,6 +181,7 @@ impl Queue {
                         self.notifications += 1;
                         break;
                     }
+
                     let e = io::Error::last_os_error();
                     if e.kind() == io::ErrorKind::Interrupted {
                         continue;
@@ -170,16 +190,20 @@ impl Queue {
                         self.notification_full += 1;
                         break;
                     }
+
                     return Err(e.into());
                 }
             }
         }
+
         Ok(())
     }
 }
+
 fn load_index(span: Span) -> u16 {
     u16::from_le(unsafe { (&*span.ptr.add(2).cast::<AtomicU16>()).load(Ordering::Acquire) })
 }
+
 pub fn nonblocking(fd: &OwnedFd) -> Result<()> {
     let old = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
     if old < 0 || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, old | libc::O_NONBLOCK) } < 0
@@ -188,6 +212,7 @@ pub fn nonblocking(fd: &OwnedFd) -> Result<()> {
     }
     Ok(())
 }
+
 pub fn drain_kick(fd: &OwnedFd) -> Result<()> {
     let mut token = 0u64;
     for _ in 0..64 {
@@ -195,6 +220,7 @@ pub fn drain_kick(fd: &OwnedFd) -> Result<()> {
         if n == 0 {
             return Err(bad("kick pipe closed"));
         }
+
         if n < 0 {
             let e = io::Error::last_os_error();
             if e.kind() == io::ErrorKind::WouldBlock {
@@ -205,12 +231,15 @@ pub fn drain_kick(fd: &OwnedFd) -> Result<()> {
             }
             return Err(e.into());
         }
+
         if n != 8 {
             return Err(bad("short kick token"));
         }
     }
+
     Ok(())
 }
+
 pub fn read_scatter(spans: &[Span], mut skip: usize, out: &mut [u8]) -> bool {
     let mut done = 0;
     for &s in spans {
@@ -218,13 +247,16 @@ pub fn read_scatter(spans: &[Span], mut skip: usize, out: &mut [u8]) -> bool {
             skip -= s.len;
             continue;
         }
+
         let n = (s.len - skip).min(out.len() - done);
         s.slice(skip, n).copy_out(&mut out[done..done + n]);
+
         done += n;
         skip = 0;
         if done == out.len() {
             return true;
         }
     }
+
     false
 }

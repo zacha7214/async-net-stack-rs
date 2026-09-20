@@ -48,9 +48,11 @@ fn packets_survive_device_move_and_drop() {
     let mut packet = dev.alloc().unwrap();
     packet.set_len(5);
     packet.as_mut_packet().copy_from_slice(b"alive");
+
     let mut moved = Box::new(dev);
     let another = moved.alloc().unwrap();
     drop(moved);
+
     assert_eq!(packet.as_slice(), b"alive");
     drop(another);
     drop(packet);
@@ -66,10 +68,12 @@ fn partial_send_can_be_retried_and_slots_are_safe() {
         buf.as_mut_packet()[0] = value;
         tx.push(buf);
     }
+
     assert_eq!(dev.send(&mut tx).unwrap(), 1);
     assert!(tx[0].as_slice().is_empty());
     assert!(tx[0].as_mut_slice().is_empty());
     assert_eq!(tx[1].as_slice(), &[9]);
+
     let mut rx = Vec::new();
     assert_eq!(dev.recv(1, &mut rx).unwrap(), 1);
     assert_eq!(rx[0].as_slice(), &[7]);
@@ -90,14 +94,17 @@ fn length_includes_headroom_in_bounds_check() {
 fn exhausted_receive_does_not_lose_queued_packets() {
     let mut dev = LoopbackDevice::with_capacity(1, 1);
     let mut tx = vec![dev.alloc().unwrap()];
+
     tx[0].set_len(1);
     tx[0].as_mut_packet()[0] = 42;
     dev.send(&mut tx).unwrap();
+
     let held = dev.alloc().unwrap();
     let mut rx = Vec::new();
     assert_eq!(dev.recv(1, &mut rx).unwrap(), 0);
     assert_eq!(dev.queued(), 1);
     drop(held);
+
     assert_eq!(dev.recv(1, &mut rx).unwrap(), 1);
     assert_eq!(rx[0].as_slice(), &[42]);
 }

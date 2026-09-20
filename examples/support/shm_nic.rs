@@ -22,6 +22,7 @@ enum Mode {
     GuestCopy,
     BothCopy,
 }
+
 impl Mode {
     fn host_copy(self) -> bool {
         matches!(self, Self::HostCopy | Self::BothCopy)
@@ -189,9 +190,11 @@ impl Layout {
     fn index(self, sequence: u64) -> usize {
         (sequence & (self.ring as u64 - 1)) as usize
     }
+
     fn offset(self, sequence: u64) -> usize {
         self.payload + self.index(sequence) * self.stride
     }
+
     fn validate(self, d: Descriptor, sequence: u64, size: usize) -> Result<usize> {
         // Exact slot matching also prevents a malformed descriptor aliasing an
         // outstanding frame. Never trust an offset before validating it.
@@ -202,6 +205,7 @@ impl Layout {
         {
             return Err(format!("invalid descriptor at sequence {sequence}").into());
         }
+
         Ok(d.offset as usize)
     }
 }
@@ -210,11 +214,13 @@ struct Mapping {
     ptr: NonNull<u8>,
     layout: Layout,
 }
+
 impl Mapping {
     fn open(file: &File, layout: Layout) -> Result<Self> {
         if file.metadata()?.len() != layout.bytes as u64 {
             return Err("shared file length does not match configuration".into());
         }
+
         // SAFETY: file has the checked size and remains mapped until Drop.
         let p = unsafe {
             libc::mmap(
@@ -226,19 +232,23 @@ impl Mapping {
                 0,
             )
         };
+
         if p == libc::MAP_FAILED {
             return Err(io::Error::last_os_error().into());
         }
+
         Ok(Self {
             ptr: NonNull::new(p.cast()).ok_or("null mapping")?,
             layout,
         })
     }
+
     fn control(&self) -> &Control {
         // SAFETY: mmap is page aligned, parent initializes Control before spawn;
         // only its atomic fields are shared, and the mapping outlives this ref.
         unsafe { &*self.ptr.as_ptr().cast::<Control>() }
     }
+
     fn descriptor(&self, sequence: u64) -> *mut Descriptor {
         // SAFETY: the masked index lies in the descriptor array.
         unsafe {
@@ -249,15 +259,18 @@ impl Mapping {
                 .add(self.layout.index(sequence))
         }
     }
+
     fn frame(&self, sequence: u64) -> *mut u8 {
         // SAFETY: each slot has stride >= size bytes inside the mapping.
         unsafe { self.ptr.as_ptr().add(self.layout.offset(sequence)) }
     }
+
     fn report(&self) -> *mut Stats {
         // SAFETY: fixed, aligned storage disjoint from Control and descriptors.
         unsafe { self.ptr.as_ptr().add(REPORT).cast::<Stats>() }
     }
 }
+
 impl Drop for Mapping {
     fn drop(&mut self) {
         // SAFETY: no local references survive self; the other process owns its
@@ -284,6 +297,7 @@ impl TempFile {
         Ok((guard, file))
     }
 }
+
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -304,6 +318,7 @@ struct Doorbell {
     mode: Wait,
     closed: Cell<bool>,
 }
+
 impl Doorbell {
     // The caller retains the owned handles for this object's entire lifetime.
     fn new(read: RawFd, write: RawFd, mode: Wait) -> Result<Self> {
@@ -322,6 +337,7 @@ impl Doorbell {
             closed: Cell::new(false),
         })
     }
+
     fn notify(&self, s: &mut Stats) -> Result<()> {
         if self.mode == Wait::Spin {
             return Ok(());
@@ -350,21 +366,26 @@ impl Doorbell {
             }
         }
     }
+
     fn idle(&self, s: &mut Stats) -> Result<()> {
         s.empty_polls += 1;
         if self.mode == Wait::Spin {
             spin_loop();
             return Ok(());
         }
+
         if self.closed.get() {
             return Err("peer closed notification pipe".into());
         }
+
         let mut pollfd = libc::pollfd {
             fd: self.read,
             events: libc::POLLIN,
             revents: 0,
         };
+
         s.poll_calls += 1;
+
         // Bounded wait permits timeout checks even when the peer disappears.
         let n = unsafe { libc::poll(&mut pollfd, 1, 50) };
         if n < 0 {
@@ -418,6 +439,7 @@ fn cpu_time() -> io::Result<(u64, u64)> {
     }
     let u = unsafe { usage.assume_init() };
     let ns = |t: libc::timeval| t.tv_sec as u64 * 1_000_000_000 + t.tv_usec as u64 * 1000;
+
     Ok((ns(u.ru_utime), ns(u.ru_stime)))
 }
 
@@ -428,6 +450,7 @@ fn generate(frame: &mut [u8], sequence: u64) {
     for (i, b) in frame[32..].iter_mut().enumerate() {
         *b = (i as u8).wrapping_add(sequence as u8);
     }
+
     frame[..16].copy_from_slice(&PREFIX);
     frame[16..24].copy_from_slice(&sequence.to_le_bytes());
     let len = frame.len() as u32;

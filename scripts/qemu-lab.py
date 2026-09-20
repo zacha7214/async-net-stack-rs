@@ -55,6 +55,14 @@ HEADLESS = ('cocoa', 'pvg', 'vnc', 'gtk', 'sdl', 'curses', 'gio', 'docs')
 BUNDLE_FILES = ('Image', 'vmlinux', 'System.map', 'config', 'initramfs.cpio.gz', 'manifest.json')
 
 TESTS = {
+    'wifi': dict(
+        title='Virtual Wi-Fi AP/station, UDP discovery and TCP echo',
+        blurb='Built-in hwsim radios run hostapd and wpa_supplicant in isolated '
+              'namespaces. Static addresses, broadcast discovery, and a kernel TCP echo.',
+        bundle=True, patched=False, boots=True, backend=False,
+        results='guest-console.log in the printed run directory; guest daemon logs '
+                'are printed to the console before shutdown.',
+        watch='wifi_associated, wifi_probe_ok, wifi_lab_cleaned and KERNEL_LAB_WIFI_RESULT=0.'),
     'shell': dict(
         title='Boot the bundle to a busybox shell',
         blurb='No lab NIC and no backend, so this also works with a stock QEMU. The '
@@ -112,7 +120,7 @@ TESTS = {
         results='Temporary files only; failures print the backend stderr.',
         watch='A clean exit. This checks the protocol implementation, not the guest driver.'),
 }
-ORDER = ('shell', 'boot', 'debug', 'zero-copy', 'copy', 'ab', 'protocol')
+ORDER = ('shell', 'boot', 'debug', 'zero-copy', 'copy', 'ab', 'protocol', 'wifi')
 
 
 def run(args, dry=False, **kw):
@@ -431,6 +439,8 @@ def steps_for(key, bundle, qemu, accel, packets, pps, timeout=45):
 
     data = ['--accel', accel, '--packets', str(packets), '--pps', str(pps)]
     return {
+        'wifi': [lab('--no-lab-nic', '--accel', accel, '--mode', 'wifi',
+                     '--timeout', str(max(timeout, 120)))],
         'shell': [lab('--no-lab-nic', '--accel', accel, '--mode', 'shell')],
         'boot': [lab('--no-lab-nic', '--accel', accel, '--mode', 'shell',
                      '--timeout', str(timeout))],
@@ -651,6 +661,10 @@ def main():
     if key is None:
         print('Nothing selected.')
         return 0
+    if key == 'wifi' and manifest is not None and 'wifi-hwsim' not in manifest.get('features', []):
+        print('This bundle predates the Wi-Fi userspace. Rebuild with --rebuild --test wifi.',
+              file=sys.stderr)
+        return 1
     blocked = available(key, manifest is not None, patched)
     if blocked:
         # Only reachable through --test: the menu never hands back a blocked key.

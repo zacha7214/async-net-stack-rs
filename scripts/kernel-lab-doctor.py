@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab_builders  # noqa: E402
 
 OK, WARN, FAIL = 'ok', 'warn', 'FAIL'
-VM_TOOLS = ('make', 'gcc', 'flex', 'bison', 'bc', 'cpio', 'nm', 'readelf', 'busybox', 'cargo')
+VM_TOOLS = ('make', 'gcc', 'flex', 'bison', 'bc', 'cpio', 'nm', 'readelf', 'busybox', 'cargo',
+            'ip', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli')
 
 
 class Report:
@@ -114,11 +115,12 @@ def check_builder(r, builder, source, work):
     gaps = missing.split()
     r.add(OK if not gaps else FAIL, 'vm toolchain', 'complete' if not gaps else 'missing: ' + ' '.join(gaps),
           'sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev '
-          'busybox-static cpio' + ('; install Rust via rustup' if 'cargo' in gaps else ''))
+          'busybox-static cpio iproute2 iw hostapd wpasupplicant wireless-regdb' +
+          ('; install Rust via rustup' if 'cargo' in gaps else ''))
 
     code, _ = vm('bash', '-lc', 'readelf -l "$(command -v busybox)" | grep -q INTERP')
     r.add(OK if code else FAIL, 'vm busybox', 'static' if code else 'dynamically linked',
-          'sudo apt-get install -y busybox-static  (the initramfs has no shared libraries)')
+          'sudo apt-get install -y busybox-static  (base boot tools use static busybox)')
 
     code, _ = vm('test', '-f', source + '/Makefile')
     r.add(OK if not code else FAIL, 'kernel source', source + ('' if not code else ' has no Makefile'),

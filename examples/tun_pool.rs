@@ -1,15 +1,18 @@
 //! Linux kernel-facing virtual UDP worker pool; see docs/network-lab.md.
+
 #[cfg(all(target_os = "linux", feature = "tun"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use async_net_stack_rs::{
         api::{Action, Service, UdpPool},
         device::DefaultDevice,
     };
+
     use clap::Parser;
     use std::{
         net::{Ipv4Addr, SocketAddrV4},
         time::{Duration, Instant},
     };
+
     #[derive(Parser)]
     struct Args {
         #[arg(long, default_value = "labtun")]
@@ -19,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
     }
+
     // The launcher terminates us after the client finishes. Preserve counters
     // on that path without performing I/O inside the signal handler.
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     extern "C" fn stop(_: libc::c_int) {
         STOP.store(true, Ordering::Relaxed);
     }
+
     for signal in [libc::SIGINT, libc::SIGTERM] {
         // SAFETY: zeroed sigaction is initialized below, the handler only uses
         // a lock-free atomic, and its code/static storage live for the process.
@@ -38,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
     let args = Args::parse();
     let device = DefaultDevice::new(&args.interface)?;
     eprintln!(
@@ -52,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             id: 7,
         })?;
     }
+
     let start = Instant::now();
     while !STOP.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(args.seconds) {
         let n = pool.poll(start.elapsed(), Duration::from_secs(5), 64, |_| {
@@ -63,9 +70,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::yield_now();
         }
     }
+
     println!("{:?}; pending={}", pool.stats(), pool.pending());
+
     Ok(())
 }
+
 #[cfg(not(all(target_os = "linux", feature = "tun")))]
 fn main() {
     eprintln!("tun_pool requires Linux and the tun feature");

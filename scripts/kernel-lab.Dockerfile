@@ -1,16 +1,15 @@
 # Build environment for scripts/build-kernel-lab.py.
 #
 # This image is never part of the guest: it holds the toolchain that produces the
-# bundle, while the bundle's own userspace is the statically linked busybox and
-# the xdp_vm_rx receiver the builder copies into the initramfs.
+# bundle. Busybox, the receiver and the Wi-Fi lab tools/Python runtime are copied
+# into the initramfs together with their shared-library dependencies.
 #
 # Built on demand by scripts/lab_builders.py (--builder docker). The platform is
 # passed at build time, so an ARM64 host builds and runs this natively.
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-# busybox-static matters: the initramfs carries no shared libraries beyond the
-# ones the receiver itself needs, so a dynamically linked busybox would not run.
+# busybox-static keeps the base boot tools independent of the copied runtimes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bc \
         binutils \
@@ -27,6 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libelf-dev \
         libssl-dev \
         python3 \
+        iproute2 \
+        iw \
+        hostapd \
+        wpasupplicant \
+        wireless-regdb \
     && rm -rf /var/lib/apt/lists/*
 
 # The kernel tree arrives as a bind mount owned by the host user. git refuses to

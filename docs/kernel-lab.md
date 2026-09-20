@@ -118,7 +118,11 @@ whole debugging path available. The checks that matter most:
 
 * The builder must be **ARM64 Linux** — the kernel is built natively, not cross-compiled.
 * `busybox` must be **statically linked** (`busybox-static`). The initramfs
-  contains no shared libraries other than those the receiver itself needs.
+  also carries the receiver and Wi-Fi tools with their shared libraries.
+* Wi-Fi userspace packaging needs `iproute2`, `iw`, `hostapd`, `wpasupplicant`
+  and Python on the builder; `wireless-regdb` supplies the regulatory database.
+  The [Wi-Fi lab guide](wifi-lab.md) covers setup and the one-command
+  `qemu-lab.py --rebuild --test wifi` flow. The builder kernel need not support Wi-Fi.
 * The kernel source tree must have **no in-tree `.config`**. The lab builds
   out-of-tree with `O=`; run `make mrproper` in that tree once if it is dirty.
 * Python **3.11+** on the host, for `hashlib.file_digest`.
@@ -217,7 +221,7 @@ A finished bundle contains:
 | `Image` | The kernel QEMU boots with `-kernel` |
 | `vmlinux` | Unstripped ELF with DWARF; the debugger's symbol source |
 | `System.map`, `config` | Symbol table and the exact `.config` used |
-| `initramfs.cpio.gz` | busybox + `xdp_vm_rx` + `kernel-lab-init.sh` as `/init` |
+| `initramfs.cpio.gz` | busybox, `xdp_vm_rx`, Wi-Fi tools/Python/runtime libraries, and `kernel-lab-init.sh` as `/init` |
 | `source/` | `arch/arm64`, `init`, `include`, `scripts/gdb` for source-level stepping |
 | `manifest.json` | Kernel release, cmdline, early-boot symbol addresses, SHA-256 of every file |
 | `source-changes.patch` | `git diff HEAD` of the kernel tree, so a modified tree stays reproducible |

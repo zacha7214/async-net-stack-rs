@@ -18,7 +18,7 @@ import shutil
 import subprocess
 
 KINDS = ('multipass', 'ssh', 'docker', 'local')
-DEFAULT_IMAGE = 'async-net-kernel-lab:24.04'
+DEFAULT_IMAGE = 'async-net-kernel-lab:24.04-wifi1'
 DEFAULT_VOLUME = 'async-net-kernel-lab-work'
 CONTAINER_SOURCE = '/src'
 # A pair of kernel files whose names differ only in case. If they are the same

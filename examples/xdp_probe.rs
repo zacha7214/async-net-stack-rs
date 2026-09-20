@@ -26,6 +26,7 @@ fn main() {
         .nth(2)
         .map(|s| s.parse().expect("queue must be u32"))
         .unwrap_or(0);
+
     let mode = std::env::args().nth(3).unwrap_or_else(|| "auto".into());
     let flags = XDP_USE_NEED_WAKEUP
         | match mode.as_str() {

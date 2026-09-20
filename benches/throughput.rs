@@ -104,8 +104,10 @@ fn roundtrip(
 /// reports frames/s; payload size has no effect on this metadata-only test.
 fn bench_batch_api(c: &mut Criterion) {
     let mut group = c.benchmark_group("pool_batch_api");
+
     for &batch in &[1usize, 8, 32, 64, 256] {
         group.throughput(Throughput::Elements(batch as u64));
+
         for batched in [false, true] {
             group.bench_with_input(
                 BenchmarkId::new(if batched { "batch" } else { "single" }, batch),
@@ -128,6 +130,7 @@ fn bench_batch_api(c: &mut Criterion) {
             );
         }
     }
+
     group.finish();
 }
 
@@ -135,6 +138,7 @@ fn bench_batch_api(c: &mut Criterion) {
 /// checksum in the timed loop: the legacy roundtrip test above includes it.
 fn bench_batched_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("batched_copy_pipeline");
+
     for &payload in &[64usize, 512, 1500] {
         for &batch in &[1usize, 8, 32, 64, 256] {
             group.throughput(Throughput::Bytes((payload * batch) as u64));
@@ -159,5 +163,6 @@ fn bench_batched_pipeline(c: &mut Criterion) {
             });
         }
     }
+
     group.finish();
 }

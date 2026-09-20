@@ -30,6 +30,19 @@ if [ -n "$lab_iface" ]; then
     echo "Lab NIC: $lab_iface"
 fi
 case "$mode" in
+    wifi)
+        wifi-lab --guest-auto
+        result=$?
+        for log in /tmp/wifi-lab-*/*.log; do
+            [ -f "$log" ] || continue
+            echo "WIFI_LOG_BEGIN $log"
+            cat "$log"
+            echo "WIFI_LOG_END $log"
+        done
+        echo "KERNEL_LAB_WIFI_RESULT=$result"
+        sync
+        poweroff -f
+        ;;
     zero-copy|copy)
         echo KERNEL_LAB_RECEIVER_BEGIN
         xdp_vm_rx --iface "$lab_iface" --mode "$mode" --packets "$packets" --samples 8
@@ -38,7 +51,10 @@ case "$mode" in
         sync
         poweroff -f
         ;;
-    shell) echo 'Run xdp_vm_rx --iface NAME --mode zero-copy --packets 10000' ;;
+    shell)
+        echo 'Run xdp_vm_rx --iface NAME --mode zero-copy --packets 10000'
+        echo 'Or: wifi-lab --guest-auto --hold'
+        ;;
     *) echo "Unknown lab.mode: $mode" ;;
 esac
 while :; do setsid cttyhack sh; done

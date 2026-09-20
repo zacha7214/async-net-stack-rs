@@ -20,6 +20,7 @@ pub struct Span {
     pub len: usize,
     pub gpa: u64,
 }
+
 impl Span {
     pub fn slice(self, offset: usize, len: usize) -> Self {
         assert!(offset <= self.len && len <= self.len - offset);
@@ -53,6 +54,7 @@ pub struct Region {
     map_len: usize,
     delta: usize,
 }
+
 impl Region {
     pub fn new(fd: OwnedFd, guest: u64, user: u64, size: u64, offset: u64) -> Result<Self> {
         if size == 0 || guest.checked_add(size).is_none() || user.checked_add(size).is_none() {
@@ -66,15 +68,18 @@ impl Region {
         {
             return Err(bad("memory region extends beyond its backing file"));
         }
+
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if page <= 0 {
             return Err(bad("cannot query host page size"));
         }
+
         let start = offset / page as u64 * page as u64;
         let delta = (offset - start) as usize;
         let map_len = usize::try_from(size)?
             .checked_add(delta)
             .ok_or_else(|| bad("mapping length overflow"))?;
+
         let offset = libc::off_t::try_from(start)?;
         let ptr = unsafe {
             libc::mmap(
@@ -86,9 +91,11 @@ impl Region {
                 offset,
             )
         };
+
         if ptr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error().into());
         }
+
         Ok(Self {
             guest,
             user,
@@ -98,6 +105,7 @@ impl Region {
             delta,
         })
     }
+
     fn span(&self, offset: u64, len: usize) -> Span {
         Span {
             ptr: unsafe { self.base.as_ptr().add(self.delta + offset as usize) },
@@ -106,6 +114,7 @@ impl Region {
         }
     }
 }
+
 impl Drop for Region {
     fn drop(&mut self) {
         unsafe {
@@ -113,6 +122,7 @@ impl Drop for Region {
         }
     }
 }
+
 #[derive(Clone, Copy)]
 struct Entry {
     iova: u64,
@@ -120,12 +130,14 @@ struct Entry {
     user: u64,
     permission: u8,
 }
+
 #[derive(Default)]
 pub struct Memory {
     pub regions: Vec<Region>,
     entries: Vec<Entry>,
     pub iommu: bool,
 }
+
 impl Memory {
     pub fn replace(&mut self, regions: Vec<Region>) -> Result<()> {
         for (i, a) in regions.iter().enumerate() {
@@ -141,6 +153,7 @@ impl Memory {
         self.entries.clear();
         Ok(())
     }
+
     pub fn invalidate(&mut self, address: u64, size: u64) -> Result<()> {
         if size == 0 {
             return Err(bad("zero-length IOTLB invalidation"));
@@ -151,6 +164,7 @@ impl Memory {
             .retain(|e| !overlap(address, size, e.iova, e.size));
         Ok(())
     }
+
     pub fn update(&mut self, address: u64, size: u64, user: u64, permission: u8) -> Result<()> {
         if size == 0 || address.checked_add(size).is_none() || !(1..=3).contains(&permission) {
             return Err(bad("invalid IOTLB update"));
@@ -169,13 +183,16 @@ impl Memory {
         });
         Ok(())
     }
+
     pub fn by_user(&self, address: u64, len: usize) -> Access<Span> {
         self.region(address, len, false)
     }
+
     fn region(&self, address: u64, len: usize, guest: bool) -> Access<Span> {
         if len == 0 || address.checked_add(len as u64).is_none() {
             return Err(invalid("invalid RAM access range"));
         }
+
         for r in &self.regions {
             let base = if guest { r.guest } else { r.user };
             if address >= base && address - base < r.size && len as u64 <= r.size - (address - base)
@@ -183,11 +200,13 @@ impl Memory {
                 return Ok(r.span(address - base, len));
             }
         }
+
         Err(invalid(format!(
             "unmapped {} address {address:#x}+{len}",
             if guest { "guest" } else { "QEMU user" }
         )))
     }
+
     pub fn translate(&self, address: u64, len: usize, permission: u8, ring: bool) -> Access<Span> {
         if !self.iommu {
             return self.region(address, len, !ring);
@@ -211,17 +230,19 @@ impl Memory {
                     address: current,
                     permission,
                 })?;
+
             let user = e.user + current - e.iova;
             if done == 0 {
                 first_user = user;
             } else if first_user.checked_add(done as u64) != Some(user) {
-                return Err(invalid("one descriptor crosses noncontiguous IOTLB mappings; use identity DMA for this lab"));
+                return Err(invalid("1 descriptor crosses noncontiguous IOTLB mappings...use identity DMA for this lab"));
             }
             done += (e.size - (current - e.iova)).min((len - done) as u64) as usize;
         }
         self.by_user(first_user, len)
     }
 }
+
 fn overlap(a: u64, size_a: u64, b: u64, size_b: u64) -> bool {
     // Subtraction avoids overflow for an invalidate-all range.
     if a <= b {
@@ -240,6 +261,7 @@ mod tests {
             iommu: true,
             ..Memory::default()
         };
+
         m.entries.push(Entry {
             iova: 0x1000,
             size: 4096,
@@ -253,6 +275,7 @@ mod tests {
                 permission: 2
             })
         ));
+
         m.entries[0].permission = 2;
         assert!(matches!(
             m.translate(0x1100, 64, 1, false),
@@ -262,6 +285,7 @@ mod tests {
             })
         ));
     }
+
     #[test]
     fn invalidation_handles_maximum_range_without_wrapping() {
         let mut m = Memory::default();

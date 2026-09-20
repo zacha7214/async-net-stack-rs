@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
+
 #[derive(Parser)]
 struct Args {
     #[arg(default_value = "10.9.0.2:9000")]
@@ -23,6 +24,7 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     seconds: u64,
 }
+
 fn main() -> Result<(), Box<dyn Error>> {
     let a = Args::parse();
     if a.count == 0
@@ -36,9 +38,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("invalid count/window/payload/timeout (IPv4 only)".into());
     }
+
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.connect(a.target)?;
     socket.set_nonblocking(true)?;
+
     let mut payload = vec![0xa5; a.payload];
     let mut rx = vec![0u8; 65536];
     let mut pending = VecDeque::<(usize, Instant)>::with_capacity(a.window);
@@ -52,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut invalid = 0;
     let start = Instant::now();
     let deadline = start + Duration::from_secs(a.seconds);
+
     while (sent < a.count || !pending.is_empty()) && Instant::now() < deadline {
         while let Some(&(id, when)) = pending.front() {
             if seen[id] {
@@ -64,8 +69,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 break;
             }
         }
+
         while pending.len() < a.window && sent < a.count {
             payload[..8].copy_from_slice(&(sent as u64).to_be_bytes());
+
             let when = Instant::now();
             match socket.send(&payload) {
                 Ok(n) if n == payload.len() => {
@@ -78,6 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Err(e) => return Err(e.into()),
             }
         }
+
         // Bound receive work so a busy peer cannot defeat the deadline.
         for _ in 0..a.window {
             match socket.recv(&mut rx) {
@@ -86,28 +94,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                         invalid += 1;
                         continue;
                     }
+
                     let id = u64::from_be_bytes(rx[..8].try_into().unwrap());
                     if id >= sent as u64 {
                         invalid += 1;
                         continue;
                     }
+
                     let id = id as usize;
                     if seen[id] {
                         duplicates += 1;
                         continue;
                     }
+
                     seen[id] = true;
                     received += 1;
                     if let Some(when) = sent_at[id] {
                         rtts.push(when.elapsed().as_nanos() as u64);
                     }
                 }
+
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e.into()),
             }
         }
+
         std::hint::spin_loop();
     }
+
     let elapsed = start.elapsed().as_secs_f64();
     rtts.sort_unstable();
     let percentile = |p| rtts.get((rtts.len().saturating_sub(1) * p) / 100).copied();
@@ -119,8 +133,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         "received_mpps": received as f64 / elapsed / 1e6,
         "rtt_ns": {"samples": rtts.len(), "p50": percentile(50), "p99": percentile(99)}})
     );
+
     if received == 0 {
         return Err("no valid echo replies received".into());
     }
+
     Ok(())
 }
