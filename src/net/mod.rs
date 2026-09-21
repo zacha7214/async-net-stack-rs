@@ -1,8 +1,9 @@
 //! IPv4 packet handling, static routes, and an Ethernet/ARP adapter.
-//! TCP and IP reassembly are not implemented. The original responder remains
-//! stateless; [`EthernetIpv4`] owns routing and neighbor resolution state.
+//! IP reassembly is not implemented. TCP endpoints live in [`crate::api::tcp`].
+//! The original responder remains stateless; [`EthernetIpv4`] owns routing and
+//! neighbor resolution state.
 pub mod arp;
-mod ethernet;
+pub mod ethernet;
 mod interface;
 pub mod neighbor;
 pub mod route;

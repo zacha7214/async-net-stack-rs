@@ -85,6 +85,15 @@ impl RouteTable {
             .copied()
     }
 
+    /// Remove a normalized prefix. The caller coordinates queued traffic.
+    pub fn remove(&mut self, address: Ipv4Addr, prefix_len: u8) -> io::Result<bool> {
+        let key = Route::new(address, prefix_len, None)?;
+        let before = self.entries.len();
+        self.entries
+            .retain(|r| r.network != key.network || r.prefix_len != key.prefix_len);
+        Ok(self.entries.len() != before)
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &Route> {
         self.entries.iter()
     }

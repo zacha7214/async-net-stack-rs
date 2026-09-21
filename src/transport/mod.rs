@@ -1,2 +1,3 @@
-//! Stateless transport helpers. TCP connection state is not implemented.
+//! Transport wire formats. TCP connection state lives in [`crate::api::tcp`].
+pub mod tcp;
 pub mod udp;

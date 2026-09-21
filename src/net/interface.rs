@@ -238,6 +238,26 @@ impl<D: Device> EthernetIpv4<D> {
         self.add_route(Route::new(Ipv4Addr::UNSPECIFIED, 0, Some(gateway))?)
     }
 
+    /// Remove a route, including the connected/default route if requested.
+    /// Pending frames are invalidated exactly as for add_route.
+    pub fn remove_route(&mut self, address: Ipv4Addr, prefix_len: u8) -> io::Result<bool> {
+        let removed = self.routes.remove(address, prefix_len)?;
+        if removed {
+            self.discard_queued();
+        }
+        Ok(removed)
+    }
+
+    /// Forget a static or learned mapping. Queued frames may have its old MAC,
+    /// so invalidate queues; a subsequent send starts fresh ARP resolution.
+    pub fn remove_neighbor(&mut self, address: Ipv4Addr) -> bool {
+        let removed = self.neighbors.remove(&address).is_some();
+        if removed {
+            self.discard_queued();
+        }
+        removed
+    }
+
     /// Static neighbors never expire and cannot be overwritten by ARP.
     pub fn add_static_neighbor(&mut self, ip: Ipv4Addr, mac: [u8; 6]) -> io::Result<()> {
         if !route::unicast(ip)
@@ -584,6 +604,11 @@ impl<D: Device> EthernetIpv4<D> {
 }
 
 impl<D: Device> Device for EthernetIpv4<D> {
+    fn poll_at(&mut self, now: Duration) -> io::Result<()> {
+        self.device.poll_at(now)?;
+        self.advance(now)
+    }
+
     fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> io::Result<usize> {
         out.clear();
         if max == 0 {
