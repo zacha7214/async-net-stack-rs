@@ -20,9 +20,15 @@ a moved or dropped device without cloning payloads.
 
 `net::Responder` answers Ethernet ARP, IPv4 ICMP echo, and UDP echo in place.
 The Ethernet parser handles up to two VLAN tags. Fragmented IP, IPv4 options,
-IPv6/NDP, TCP, routing, multi-buffer XDP and shared-UMEM/multi-queue dispatch are
+IPv6/NDP, TCP, IP forwarding, multi-buffer XDP and shared-UMEM/multi-queue dispatch are
 not implemented. The device API is poll-based; it is not yet an async TCP socket
 API. `af_packet` remains an empty compatibility feature.
+
+`net::EthernetIpv4` adds single-interface IPv4 endpoint routing and ARP resolution
+above an untagged Ethernet device, allowing `UdpPool` to run over AF_XDP. It has
+static/default routes, static and expiring dynamic neighbors, bounded queues,
+explicit timers, and optional route/neighbor diagnostic events. See the
+[Ethernet/IPv4 guide](docs/ethernet-ipv4.md) and `examples/xdp_pool.rs`.
 
 ## Virtual pools and network behavior labs
 

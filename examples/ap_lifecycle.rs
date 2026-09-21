@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Link::default()
         },
     )?;
-
+    
     client.send_to(client_addr, firmware_addr, b"before restart")?;
     client.flush()?;
     firmware.poll(ap.now(), LEASE, 8, |_| Action::Echo)?;

@@ -2,8 +2,8 @@
 //!
 //! A pool multiplexes many application addresses over one TUN or simulated
 //! device. Queues are bounded; `WouldBlock` means retry after polling. This is
-//! best-effort UDP, not reliable streams. AF_XDP needs an Ethernet/neighbor
-//! adapter and cannot be passed directly to this L3 API.
+//! best-effort UDP, not reliable streams. Wrap AF_XDP in [`crate::net::EthernetIpv4`]
+//! before passing it to this L3 API, and advance the adapter's clock each loop.
 use crate::device::{Device, PacketBuf};
 use crate::transport::udp::{build_ipv4, parse_ipv4, Datagram};
 use std::{collections::BTreeMap, io, net::SocketAddrV4, time::Duration};

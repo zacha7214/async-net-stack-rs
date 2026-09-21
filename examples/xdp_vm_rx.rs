@@ -153,6 +153,7 @@ mod guest {
                         )
                         .into());
                     }
+                    
                     let size = u32::from_le_bytes(b[32..36].try_into().unwrap()) as usize;
                     if size != b.len()
                         || b[36..40] != [0; 4]
