@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "clean": ["limit", "256"],
+    "lossy": ["limit", "64", "delay", "20ms", "10ms", "loss", "random", "3%", "rate", "2mbit"],
+    "bufferbloat": ["limit", "2000", "delay", "20ms", "10ms", "loss", "random", "3%", "rate", "2mbit"],
+    "burst-loss": ["limit", "64", "delay", "20ms", "loss", "gemodel", "2%", "25%", "80%", "0.1%", "rate", "2mbit"],
+    "reorder": ["limit", "128", "delay", "30ms", "10ms", "reorder", "20%", "50%", "duplicate", "1%"]
+  }
+}

@@ -5,12 +5,13 @@
 //! pool owns its device's receive stream; do not independently poll a UdpPool
 //! over the same device. Shared UDP/TCP dispatch is a subsequent extension.
 //!
-//! The sender deliberately allows one outstanding segment per connection.
+//! The sender uses bounded flight queues, slow start and congestion avoidance.
 //! Receive delivery is in order: out-of-order data is ACKed but not buffered.
 //! MSS, bounded buffers, retransmission/backoff, zero-window probes, half-close,
 //! and TIME-WAIT are included. Window scaling, SACK, timestamps, ECN negotiation,
-//! simultaneous open, urgent data, PMTU adaptation, and a full congestion-control
-//! algorithm are absent. This is a lab implementation, not RFC-complete TCP.
+//! simultaneous open, urgent data, PMTU adaptation, and fast retransmit/recovery
+//! are absent; loss recovery currently uses the retransmission timer. This is a
+//! lab implementation, not RFC-complete TCP.
 mod connection;
 
 use crate::{
@@ -27,6 +28,12 @@ use std::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(u64);
+impl ConnectionId {
+    /// Stable within a pool; combine with telemetry session ID across restarts.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpState {
@@ -60,7 +67,31 @@ pub struct TcpConfig {
     pub control_capacity: usize,
     /// Per-connection bytes, including unacknowledged payload on the send side.
     pub send_capacity: usize,
+    /// Receive storage, 1..=65535 bytes (window scaling is not negotiated).
     pub receive_capacity: usize,
+    /// Maximum advertised free space; capped by actual remaining receive storage.
+    pub receive_window_limit: u16,
+    /// Initial congestion window in negotiated MSS units, 1..=4. The RFC 5681
+    /// initial-window bound for large MSS values is applied automatically.
+    pub initial_cwnd_segments: u16,
+    /// Local byte ceiling (1..=2^30), never advertised on the wire. Actual output
+    /// is also limited by send storage, flight slots and the peer receive window;
+    /// without window scaling a peer can permit at most 65535 bytes in flight.
+    pub max_cwnd_bytes: usize,
+    /// Initial slow-start threshold (1..=2^30 bytes); loss updates it dynamically.
+    pub initial_ssthresh_bytes: usize,
+    /// Bounds retransmission descriptors, even with very small peer MSS values.
+    pub max_inflight_segments: usize,
+    /// Maximum segment submissions per connection in one poll.
+    pub tx_burst: usize,
+    /// Collect fixed-size state events, without formatting, I/O or extra clocks.
+    pub verbose_state: bool,
+    /// Global bounded event ring; oldest events are overwritten when full.
+    pub event_capacity: usize,
+    /// Minimum interval between changing flow-metric snapshots. State/wait
+    /// transitions and retransmissions bypass this limit. No periodic event is
+    /// emitted for an unchanged connection, including an unchanged ACK wait.
+    pub state_report_interval: Duration,
     /// IPv4 datagram size; must also fit the underlying adapter and frame pool.
     pub mtu: usize,
     /// Local receive MSS and maximum send segment size before peer negotiation.
@@ -82,6 +113,15 @@ impl Default for TcpConfig {
             control_capacity: 64,
             send_capacity: 16 * 1024,
             receive_capacity: 16 * 1024,
+            receive_window_limit: u16::MAX,
+            initial_cwnd_segments: 2,
+            max_cwnd_bytes: 16 * 1024,
+            initial_ssthresh_bytes: 65535,
+            max_inflight_segments: 128,
+            tx_burst: 32,
+            verbose_state: false,
+            event_capacity: 256,
+            state_report_interval: Duration::from_millis(250),
             mtu: 1500,
             mss: 536,
             initial_rto: Duration::from_secs(1),
@@ -105,6 +145,7 @@ pub struct TcpStats {
     pub resets_submitted: u64,
     pub control_drops: u64,
     pub connection_overflow: u64,
+    pub events_overwritten: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -114,8 +155,50 @@ pub struct ConnectionStatus {
     pub state: TcpState,
     pub send_buffered: usize,
     pub receive_buffered: usize,
+    pub flow: FlowStatus,
     /// A local route/address/packet error, distinct from a peer reset or timeout.
     pub local_error: Option<io::ErrorKind>,
+}
+
+/// Why output is currently idle. A wait is reported once until its reason changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TcpWait {
+    Application,
+    Acknowledgment,
+    PeerWindow,
+    CongestionWindow,
+    FlightLimit,
+    Device,
+    Handshake,
+    Closing,
+    Terminal,
+    Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlowStatus {
+    pub advertised_window: u16,
+    pub peer_window: u16,
+    pub congestion_window: usize,
+    pub slow_start_threshold: usize,
+    /// Submitted sequence-space bytes that have not been acknowledged.
+    pub bytes_in_flight: usize,
+    /// Includes a prepared segment awaiting device capacity.
+    pub outstanding_segments: usize,
+    pub retransmission_timeout: Duration,
+    pub timeout_retransmissions: u64,
+    pub wait: TcpWait,
+}
+
+/// Snapshot on a state/wait transition or timeout retransmission. Stable waiting
+/// periods emit no repeated events, even if poll is called continuously. Changed
+/// flow metrics are additionally sampled at state_report_interval; status() gives
+/// an on-demand snapshot regardless of whether event collection is enabled.
+#[derive(Clone, Copy, Debug)]
+pub struct TcpEvent {
+    pub at: Duration,
+    pub connection: ConnectionId,
+    pub status: ConnectionStatus,
 }
 
 #[derive(Clone, Copy)]
@@ -137,6 +220,7 @@ pub struct TcpPool<D> {
     now: Duration,
     next_id: u64,
     stats: TcpStats,
+    events: VecDeque<TcpEvent>,
 }
 
 impl<D: Device> TcpPool<D> {
@@ -145,7 +229,18 @@ impl<D: Device> TcpPool<D> {
             || config.max_listeners == 0
             || config.control_capacity == 0
             || config.send_capacity == 0
-            || config.send_capacity > u16::MAX as usize
+            || config.send_capacity > (1 << 30)
+            || config.receive_window_limit == 0
+            || !(1..=4).contains(&config.initial_cwnd_segments)
+            || config.max_cwnd_bytes == 0
+            || config.max_cwnd_bytes > (1 << 30)
+            || config.initial_ssthresh_bytes == 0
+            || config.initial_ssthresh_bytes > (1 << 30)
+            || config.max_inflight_segments == 0
+            || config.max_inflight_segments > u16::MAX as usize
+            || config.tx_burst == 0
+            || (config.verbose_state
+                && (config.event_capacity == 0 || config.state_report_interval.is_zero()))
             || config.receive_capacity == 0
             || config.receive_capacity > u16::MAX as usize
             || config.mtu < 68
@@ -172,6 +267,11 @@ impl<D: Device> TcpPool<D> {
             now: Duration::ZERO,
             next_id: 1,
             stats: TcpStats::default(),
+            events: VecDeque::with_capacity(if config.verbose_state {
+                config.event_capacity
+            } else {
+                0
+            }),
         })
     }
 
@@ -259,14 +359,46 @@ impl<D: Device> TcpPool<D> {
 
     pub fn status(&self, id: ConnectionId) -> io::Result<ConnectionStatus> {
         let c = self.connections.get(&id).ok_or_else(missing)?;
-        Ok(ConnectionStatus {
-            local: c.local,
-            remote: c.remote,
-            state: c.state,
-            send_buffered: c.send_buffered(),
-            receive_buffered: c.received.len(),
-            local_error: c.local_error,
-        })
+        Ok(c.status(&self.config))
+    }
+
+    /// Drain outside the packet-processing path. The library never prints events.
+    pub fn pop_event(&mut self) -> Option<TcpEvent> {
+        self.events.pop_front()
+    }
+
+    fn report_states(&mut self) {
+        if !self.config.verbose_state {
+            return;
+        }
+        for (&id, c) in &mut self.connections {
+            let status = c.status(&self.config);
+            let key = (
+                status.state,
+                status.flow.wait,
+                status.flow.timeout_retransmissions,
+            );
+            let transition = c.reported != Some(key);
+            let metrics_changed = c.reported_flow != Some(status.flow);
+            let sample_due = self.now
+                >= c.reported_at
+                    .saturating_add(self.config.state_report_interval);
+            if !transition && !(metrics_changed && sample_due) {
+                continue;
+            }
+            c.reported = Some(key);
+            c.reported_flow = Some(status.flow);
+            c.reported_at = self.now;
+            if self.events.len() == self.config.event_capacity {
+                self.events.pop_front();
+                self.stats.events_overwritten = self.stats.events_overwritten.saturating_add(1);
+            }
+            self.events.push_back(TcpEvent {
+                at: self.now,
+                connection: id,
+                status,
+            });
+        }
     }
 
     pub fn connections(&self) -> impl Iterator<Item = ConnectionId> + '_ {
@@ -301,6 +433,7 @@ impl<D: Device> TcpPool<D> {
         let reset = c.reset_packet();
         c.fail(TcpState::Reset);
         self.queue_reset(reset);
+        self.report_states();
         Ok(())
     }
 
@@ -315,11 +448,12 @@ impl<D: Device> TcpPool<D> {
         {
             return Err(blocked("connection is not terminal"));
         }
+        self.report_states();
         self.connections.remove(&id);
         Ok(())
     }
 
-    /// Receive at most budget packets; attempt at most one segment per connection
+    /// Receive at most budget packets; submit at most tx_burst segments per connection
     /// and one reset per call. All time is supplied by the caller, with no sleeps.
     /// Submission is not remote delivery. Local route/address errors fail the
     /// affected connection (see status); other backend errors return to the caller.
@@ -331,6 +465,7 @@ impl<D: Device> TcpPool<D> {
         for c in self.connections.values_mut() {
             c.tick(now, &self.config);
         }
+        self.report_states();
         self.connections
             .retain(|_, c| c.accepted || !c.state.is_terminal());
         self.device.poll_at(now)?;
@@ -360,25 +495,31 @@ impl<D: Device> TcpPool<D> {
         result?;
         self.flush_reset()?;
         for connection in self.connections.values_mut() {
-            let (sent, retransmitted) =
-                match connection.transmit(&mut self.device, now, &self.config) {
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::NotConnected
-                                | io::ErrorKind::AddrNotAvailable
-                                | io::ErrorKind::InvalidInput
-                        ) =>
-                    {
-                        connection.fail(TcpState::Failed);
-                        connection.local_error = Some(e.kind());
-                        continue;
-                    }
-                    result => result?,
-                };
-            self.stats.submitted += u64::from(sent);
-            self.stats.retransmitted += u64::from(retransmitted);
+            for _ in 0..self.config.tx_burst {
+                let (sent, retransmitted) =
+                    match connection.transmit(&mut self.device, now, &self.config) {
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                io::ErrorKind::NotConnected
+                                    | io::ErrorKind::AddrNotAvailable
+                                    | io::ErrorKind::InvalidInput
+                            ) =>
+                        {
+                            connection.fail(TcpState::Failed);
+                            connection.local_error = Some(e.kind());
+                            break;
+                        }
+                        result => result?,
+                    };
+                self.stats.submitted += u64::from(sent);
+                self.stats.retransmitted += u64::from(retransmitted);
+                if !sent {
+                    break;
+                }
+            }
         }
+        self.report_states();
         self.device.poll_at(now)?;
         Ok(count)
     }

@@ -5,10 +5,10 @@
 //! best-effort UDP, not reliable streams. Wrap AF_XDP in [`crate::net::EthernetIpv4`]
 //! before passing it to this L3 API. Polling also advances adapter timers.
 pub mod tcp;
-pub use tcp::{ConnectionId, TcpConfig, TcpPool, TcpState};
 use crate::device::{Device, PacketBuf};
 use crate::transport::udp::{build_ipv4, parse_ipv4, Datagram};
 use std::{collections::BTreeMap, io, net::SocketAddrV4, time::Duration};
+pub use tcp::{ConnectionId, TcpConfig, TcpPool, TcpState};
 
 const QUERY: &[u8] = b"ANSP\x01\x00";
 const ADVERT: &[u8] = b"ANSP\x01\x01";

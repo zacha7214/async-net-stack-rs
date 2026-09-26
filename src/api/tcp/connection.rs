@@ -1,6 +1,6 @@
-//! Bounded stop-and-wait TCP state machine. Payload is retained separately from
+//! Bounded sliding-window TCP state machine. Payload is retained separately from
 //! device buffers: a lost packet must not pin a scarce AF_XDP RX/UMEM frame.
-use super::{blocked, invalid, Reset, TcpConfig, TcpState};
+use super::{blocked, invalid, ConnectionStatus, FlowStatus, Reset, TcpConfig, TcpState, TcpWait};
 use crate::{
     device::Device,
     transport::tcp::{self, before, Segment, ACK, FIN, PSH, RST, SYN},
@@ -18,6 +18,7 @@ struct Flight {
     persist: bool,
     rtt_eligible: bool,
 }
+
 impl Flight {
     fn end(&self) -> u32 {
         self.sequence
@@ -25,6 +26,7 @@ impl Flight {
             .wrapping_add(u32::from(self.flags & SYN != 0))
             .wrapping_add(u32::from(self.flags & FIN != 0))
     }
+
     fn due(&self, now: Duration) -> bool {
         self.last_sent
             .map_or(true, |at| now >= at.saturating_add(self.rto))
@@ -38,10 +40,25 @@ pub(super) struct Connection {
     pub accepted: bool,
     pub received: VecDeque<u8>,
     pub local_error: Option<io::ErrorKind>,
+
     queued: VecDeque<u8>,
-    flight: Option<Flight>,
+    flights: VecDeque<Flight>,
+    flight_payload: usize,
+    cwnd: usize,
+    ssthresh: usize,
+    congestion_credit: usize,
+    last_data_sent: Option<Duration>,
+    syn_retransmitted: bool,
+    timeout_retransmissions: u64,
+    device_blocked: bool,
+
+    pub reported: Option<(TcpState, TcpWait, u64)>,
+    pub reported_flow: Option<FlowStatus>,
+    pub reported_at: Duration,
+
     send_una: u32,
     send_next: u32,
+
     // Unlike send_next, this excludes a prepared segment that the device has
     // not accepted. A peer cannot acknowledge bytes we have never submitted.
     send_sent: u32,
@@ -78,7 +95,18 @@ impl Connection {
             received: VecDeque::with_capacity(cfg.receive_capacity),
             local_error: None,
             queued: VecDeque::with_capacity(cfg.send_capacity),
-            flight: None,
+            flights: VecDeque::with_capacity(cfg.max_inflight_segments),
+            flight_payload: 0,
+            cwnd: cfg.max_cwnd_bytes.min(cfg.mss as usize),
+            ssthresh: cfg.initial_ssthresh_bytes,
+            congestion_credit: 0,
+            last_data_sent: None,
+            syn_retransmitted: false,
+            timeout_retransmissions: 0,
+            device_blocked: false,
+            reported: None,
+            reported_flow: None,
+            reported_at: now,
             send_una: iss,
             send_next: iss,
             send_sent: iss,
@@ -98,6 +126,7 @@ impl Connection {
             window_probe_at: now,
             probe_pending: false,
         };
+
         c.start_flight(SYN, Vec::new(), false, now);
         c
     }
@@ -110,12 +139,13 @@ impl Connection {
         c.peer_window = syn.window;
         c.peer_mss = syn.mss.unwrap_or(536);
         c.window_sequence = syn.sequence;
-        c.flight.as_mut().unwrap().flags = SYN | ACK;
+        c.flights.front_mut().unwrap().flags = SYN | ACK;
+
         c
     }
 
     pub fn send_buffered(&self) -> usize {
-        self.queued.len() + self.flight.as_ref().map_or(0, |f| f.payload.len())
+        self.queued.len() + self.flight_payload
     }
 
     pub fn write(&mut self, bytes: &[u8], cfg: &TcpConfig) -> io::Result<usize> {
@@ -125,13 +155,16 @@ impl Connection {
                 "TCP write side is not established/open",
             ));
         }
+
         if bytes.is_empty() {
             return Ok(0);
         }
+
         let n = bytes.len().min(cfg.send_capacity - self.send_buffered());
         if n == 0 {
             return Err(blocked("TCP send buffer full"));
         }
+
         self.queued.extend(bytes[..n].iter().copied());
         Ok(n)
     }
@@ -140,23 +173,29 @@ impl Connection {
         if out.is_empty() {
             return Ok(0);
         }
+
         if let Some(kind) = self.local_error {
             return Err(io::Error::new(kind, "TCP local network failure"));
         }
+
         if self.state == TcpState::Reset {
             return Err(io::Error::new(io::ErrorKind::ConnectionReset, "TCP reset"));
         }
+
         if self.state == TcpState::TimedOut {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP timed out"));
         }
+
         let n = out.len().min(self.received.len());
         for byte in &mut out[..n] {
             *byte = self.received.pop_front().unwrap();
         }
+
         if n > 0 {
             self.ack_pending = true; // Reopen the advertised receive window.
             return Ok(n);
         }
+
         if self.peer_eof || self.state == TcpState::Closed {
             Ok(0)
         } else {
@@ -168,11 +207,13 @@ impl Connection {
         if self.write_closed {
             return Ok(());
         }
+
         if !matches!(self.state, TcpState::Established | TcpState::CloseWait) {
             return Err(invalid("close requires an established TCP connection"));
         }
         self.write_closed = true;
         self.close_deadline = Some(now.saturating_add(cfg.close_timeout));
+
         Ok(())
     }
 
@@ -181,7 +222,11 @@ impl Connection {
         self.local_error = None;
         self.queued.clear();
         self.received.clear();
-        self.flight = None;
+        self.flights.clear();
+        self.flight_payload = 0;
+        self.send_una = self.send_sent;
+        self.send_next = self.send_sent;
+        self.device_blocked = false;
         self.ack_pending = false;
         self.phase_deadline = None;
         self.close_deadline = None;
@@ -205,6 +250,7 @@ impl Connection {
         if self.state.is_terminal() {
             return;
         }
+
         if self.state == TcpState::TimeWait {
             if self.phase_deadline.is_some_and(|deadline| now >= deadline) {
                 self.state = TcpState::Closed;
@@ -213,12 +259,14 @@ impl Connection {
             }
             return;
         }
+
         let expired = self.phase_deadline.is_some_and(|deadline| now >= deadline)
             || self.close_deadline.is_some_and(|deadline| now >= deadline)
-            || self.flight.as_ref().is_some_and(|f| {
+            || self.flights.front().is_some_and(|f| {
                 now >= f.created.saturating_add(cfg.send_timeout)
                     || (!f.persist && f.due(now) && f.transmissions > cfg.max_retransmits)
             });
+
         if expired {
             self.fail(TcpState::TimedOut);
         }
@@ -228,20 +276,23 @@ impl Connection {
         if self.state.is_terminal() {
             return None;
         }
-        let flight = self.flight.as_ref().map(|f| {
+
+        let flight = self.flights.front().map(|f| {
             f.last_sent
                 .map_or(f.created, |at| at.saturating_add(f.rto))
                 .min(f.created.saturating_add(cfg.send_timeout))
         });
+
         let probe = if self.write_closed
             && self.peer_window == 0
-            && self.flight.is_none()
+            && self.flights.is_empty()
             && matches!(self.state, TcpState::Established | TcpState::CloseWait)
         {
             Some(self.window_probe_at)
         } else {
             None
         };
+
         [self.phase_deadline, self.close_deadline, flight, probe]
             .into_iter()
             .flatten()
@@ -252,10 +303,12 @@ impl Connection {
         if self.state.is_terminal() {
             return;
         }
+
         if self.state == TcpState::SynSent {
             self.syn_sent(segment, now, cfg);
             return;
         }
+
         if self.state == TcpState::TimeWait {
             // Ignore RST here to avoid prematurely assassinating TIME-WAIT.
             if segment.flags & RST == 0 {
@@ -268,17 +321,19 @@ impl Connection {
             }
             return;
         }
+
         if self.state == TcpState::SynReceived
             && segment.flags & (SYN | ACK | RST) == SYN
             && segment.sequence.wrapping_add(1) == self.receive_next
         {
             // Duplicate SYN: repeat SYN-ACK, keeping the retry count and Karn state.
-            if let Some(flight) = &mut self.flight {
+            if let Some(flight) = self.flights.front_mut() {
                 flight.last_sent = None;
             }
             return;
         }
-        let window = cfg.receive_capacity - self.received.len();
+
+        let window = self.advertised_window(cfg) as usize;
         let relative = segment.sequence.wrapping_sub(self.receive_next) as i32 as i64;
         let length = segment.sequence_len() as i64;
         let acceptable = if length == 0 {
@@ -286,12 +341,14 @@ impl Connection {
         } else {
             window > 0 && relative < window as i64 && relative + length > 0
         };
+
         if !acceptable {
             if segment.flags & RST == 0 {
                 self.ack_pending = true;
             }
             return;
         }
+
         if segment.flags & RST != 0 {
             if segment.sequence == self.receive_next {
                 self.fail(TcpState::Reset);
@@ -300,17 +357,21 @@ impl Connection {
             }
             return;
         }
+
         if segment.flags & SYN != 0 {
             self.ack_pending = true;
             return;
         }
+
         if segment.flags & ACK == 0 {
             return;
         }
+
         if before(self.send_sent, segment.acknowledgment) {
             self.ack_pending = true;
             return;
         }
+
         if self.state == TcpState::SynReceived {
             if segment.acknowledgment != self.send_sent || self.send_sent == self.send_una {
                 return;
@@ -318,10 +379,12 @@ impl Connection {
             self.state = TcpState::Established;
             self.phase_deadline = None;
         }
+
         self.acknowledge(segment, now, cfg);
         if self.state.is_terminal() {
             return;
         }
+
         self.receive_data(segment, now, cfg);
     }
 
@@ -329,16 +392,19 @@ impl Connection {
         let valid_ack = segment.flags & ACK != 0
             && segment.acknowledgment == self.send_sent
             && self.send_sent != self.send_una;
+
         if segment.flags & RST != 0 {
             if valid_ack {
                 self.fail(TcpState::Reset);
             }
             return;
         }
+
         // Simultaneous open is deliberately not implemented in this initial engine.
         if !valid_ack || segment.flags & SYN == 0 || segment.flags & FIN != 0 {
             return;
         }
+
         self.receive_next = segment.sequence.wrapping_add(1);
         self.peer_window = segment.window;
         self.peer_mss = segment.mss.unwrap_or(536);
@@ -348,12 +414,14 @@ impl Connection {
         self.state = TcpState::Established;
         self.phase_deadline = None;
         self.ack_pending = true;
+
         if !segment.payload.is_empty() {
             let data = Segment {
                 sequence: segment.sequence.wrapping_add(1),
                 flags: segment.flags & !SYN,
                 ..*segment
             };
+
             self.receive_data(&data, now, cfg);
         }
     }
@@ -363,6 +431,7 @@ impl Connection {
         if before(ack, self.send_una) {
             return;
         }
+
         if before(self.window_sequence, segment.sequence)
             || (self.window_sequence == segment.sequence && !before(ack, self.window_ack))
         {
@@ -370,56 +439,96 @@ impl Connection {
             self.window_sequence = segment.sequence;
             self.window_ack = ack;
             if self.peer_window > 0 {
-                if let Some(f) = &mut self.flight {
+                for f in &mut self.flights {
                     f.persist = false;
                 }
             }
         }
+
         if ack == self.send_una {
             return;
         }
+
         let mut completed_flags = 0;
         let mut sample = None;
-        if let Some(flight) = &mut self.flight {
-            if ack == flight.end() {
-                completed_flags = flight.flags;
-                if flight.transmissions == 1 && flight.rtt_eligible {
-                    sample = flight.last_sent.map(|at| now.saturating_sub(at));
+        let mut ambiguous = false;
+        let mut acknowledged_payload = 0;
+        while let Some(f) = self.flights.front_mut() {
+            if !before(f.sequence, ack) {
+                break;
+            }
+
+            ambiguous |= !f.rtt_eligible || f.transmissions > 1;
+            if !before(ack, f.end()) {
+                completed_flags |= f.flags;
+                acknowledged_payload += f.payload.len();
+                if f.transmissions == 1 && f.rtt_eligible {
+                    sample = f.last_sent.map(|at| now.saturating_sub(at));
                 }
+                self.flights.pop_front();
             } else {
-                // Only data segments can be partially acknowledged: SYN/FIN are
-                // emitted separately and each occupies a single sequence number.
-                let consumed = ack.wrapping_sub(flight.sequence) as usize;
-                if consumed > flight.payload.len() {
+                let consumed = ack.wrapping_sub(f.sequence) as usize;
+                // SYN and FIN are always separate from data.
+                if consumed > f.payload.len() {
                     return;
                 }
-                flight.payload.drain(..consumed);
-                flight.sequence = ack;
-                // Don't sample RTT after a partial ACK; restart the retransmission timer.
-                flight.rtt_eligible = false;
-                flight.last_sent = Some(now);
+                f.payload.drain(..consumed);
+                f.sequence = ack;
+                f.rtt_eligible = false;
+                acknowledged_payload += consumed;
+                break;
             }
         }
+
+        self.flight_payload -= acknowledged_payload;
         self.send_una = ack;
-        if completed_flags != 0 {
-            let was_retransmitted = self.flight.as_ref().is_some_and(|f| f.transmissions > 1);
-            self.flight = None;
+        if !ambiguous {
             if let Some(sample) = sample {
                 self.update_rto(sample, cfg);
-            } else if was_retransmitted && completed_flags & SYN != 0 {
+            }
+        }
+
+        // RFC 6298: restart the single retransmission timer on ACK progress.
+        if let Some(f) = self.flights.front_mut() {
+            if f.last_sent.is_some() {
+                f.last_sent = Some(now);
+                f.rto = self.rto;
+                // last_sent now denotes the timer origin, not original send time.
+                f.rtt_eligible = false;
+            }
+        }
+
+        if completed_flags & SYN != 0 {
+            self.cwnd = self.initial_cwnd(cfg);
+            if self.syn_retransmitted {
                 self.rto = Duration::from_secs(3).max(cfg.initial_rto).min(cfg.max_rto);
             }
-            if completed_flags & FIN != 0 {
-                match self.state {
-                    TcpState::FinWait1 => self.state = TcpState::FinWait2,
-                    TcpState::Closing => self.enter_time_wait(now, cfg),
-                    TcpState::LastAck => {
-                        self.state = TcpState::Closed;
-                        self.close_deadline = None;
-                        self.ack_pending = false;
-                    }
-                    _ => {}
+        } else if acknowledged_payload > 0 {
+            let mss = self.send_mss(cfg);
+            if self.cwnd < self.ssthresh {
+                self.cwnd = self.cwnd.saturating_add(acknowledged_payload.min(mss));
+            } else {
+                self.congestion_credit =
+                    self.congestion_credit.saturating_add(acknowledged_payload);
+                if self.congestion_credit >= self.cwnd {
+                    self.congestion_credit -= self.cwnd;
+                    self.cwnd = self.cwnd.saturating_add(mss);
                 }
+            }
+
+            self.cwnd = self.cwnd.min(cfg.max_cwnd_bytes);
+        }
+
+        if completed_flags & FIN != 0 {
+            match self.state {
+                TcpState::FinWait1 => self.state = TcpState::FinWait2,
+                TcpState::Closing => self.enter_time_wait(now, cfg),
+                TcpState::LastAck => {
+                    self.state = TcpState::Closed;
+                    self.close_deadline = None;
+                    self.ack_pending = false;
+                }
+                _ => {}
             }
         }
     }
@@ -428,6 +537,7 @@ impl Connection {
         if segment.payload.is_empty() && segment.flags & FIN == 0 {
             return;
         }
+
         self.ack_pending = true;
         if self.peer_eof
             || !matches!(
@@ -437,19 +547,23 @@ impl Connection {
         {
             return;
         }
+
         if before(self.receive_next, segment.sequence) {
             return;
         } // No out-of-order storage.
-        let window = cfg.receive_capacity - self.received.len();
+
+        let window = self.advertised_window(cfg) as usize;
         let skip = self.receive_next.wrapping_sub(segment.sequence) as usize;
         if skip > segment.payload.len() {
             return;
         }
+
         let count = (segment.payload.len() - skip).min(window);
         self.received
             .extend(segment.payload[skip..skip + count].iter().copied());
         self.receive_next = self.receive_next.wrapping_add(count as u32);
         let fin_sequence = segment.sequence.wrapping_add(segment.payload.len() as u32);
+
         if segment.flags & FIN != 0 && fin_sequence == self.receive_next && count < window {
             self.receive_next = self.receive_next.wrapping_add(1);
             self.peer_eof = true;
@@ -482,6 +596,7 @@ impl Connection {
             self.srtt = Some(sample);
             self.rttvar = sample / 2;
         }
+
         self.rto = self
             .srtt
             .unwrap()
@@ -502,44 +617,133 @@ impl Connection {
             persist,
             rtt_eligible: true,
         };
+
         self.send_next = flight.end();
-        self.flight = Some(flight);
+        self.flight_payload += flight.payload.len();
+        self.flights.push_back(flight);
+    }
+
+    fn send_mss(&self, cfg: &TcpConfig) -> usize {
+        usize::from(cfg.mss.min(self.peer_mss.max(1)))
+    }
+
+    fn initial_cwnd(&self, cfg: &TcpConfig) -> usize {
+        let mss = self.send_mss(cfg);
+        let segments = if self.syn_retransmitted {
+            1
+        } else if mss > 2190 {
+            2
+        } else if mss > 1095 {
+            3
+        } else {
+            4
+        };
+        (mss * usize::from(cfg.initial_cwnd_segments).min(segments)).min(cfg.max_cwnd_bytes)
+    }
+
+    fn advertised_window(&self, cfg: &TcpConfig) -> u16 {
+        (cfg.receive_capacity - self.received.len()).min(cfg.receive_window_limit as usize) as u16
+    }
+
+    fn bytes_in_flight(&self) -> usize {
+        self.send_sent.wrapping_sub(self.send_una) as usize
+    }
+
+    pub fn status(&self, cfg: &TcpConfig) -> ConnectionStatus {
+        let inflight = self.bytes_in_flight();
+        let wait = if self.state.is_terminal() {
+            TcpWait::Terminal
+        } else if self.device_blocked {
+            TcpWait::Device
+        } else if matches!(self.state, TcpState::SynSent | TcpState::SynReceived) {
+            TcpWait::Handshake
+        } else if !self.queued.is_empty() {
+            if self.peer_window as usize <= inflight {
+                TcpWait::PeerWindow
+            } else if self.cwnd <= inflight {
+                TcpWait::CongestionWindow
+            } else if self.flights.len() >= cfg.max_inflight_segments {
+                TcpWait::FlightLimit
+            } else {
+                TcpWait::Ready
+            }
+        } else if self.peer_window == 0 && (!self.flights.is_empty() || self.write_closed) {
+            TcpWait::PeerWindow
+        } else if !self.flights.is_empty() {
+            TcpWait::Acknowledgment
+        } else if self.write_closed {
+            TcpWait::Closing
+        } else {
+            TcpWait::Application
+        };
+
+        ConnectionStatus {
+            local: self.local,
+            remote: self.remote,
+            state: self.state,
+            send_buffered: self.send_buffered(),
+            receive_buffered: self.received.len(),
+            local_error: self.local_error,
+            flow: FlowStatus {
+                advertised_window: self.advertised_window(cfg),
+                peer_window: self.peer_window,
+                congestion_window: self.cwnd,
+                slow_start_threshold: self.ssthresh,
+                bytes_in_flight: inflight,
+                outstanding_segments: self.flights.len(),
+                retransmission_timeout: self.rto,
+                timeout_retransmissions: self.timeout_retransmissions,
+                wait,
+            },
+        }
     }
 
     fn prepare(&mut self, now: Duration, cfg: &TcpConfig) {
-        if self.flight.is_some()
-            || !matches!(self.state, TcpState::Established | TcpState::CloseWait)
+        if !matches!(self.state, TcpState::Established | TcpState::CloseWait)
+            || self.flights.len() >= cfg.max_inflight_segments
+            || self.flights.back().is_some_and(|f| f.transmissions == 0)
         {
             return;
         }
+
         if !self.queued.is_empty() {
-            let persist = self.peer_window == 0;
-            // A single-byte zero-window probe remains unacknowledged until the
-            // receiver opens its window. It consumes no additional pool frame.
-            let window = if persist {
+            if self.flights.is_empty()
+                && self
+                    .last_data_sent
+                    .is_some_and(|at| now >= at.saturating_add(self.rto))
+            {
+                self.cwnd = self.cwnd.min(self.initial_cwnd(cfg));
+                self.congestion_credit = 0;
+            }
+
+            let persist = self.peer_window == 0 && self.flights.is_empty();
+            let reserved = self.send_next.wrapping_sub(self.send_una) as usize;
+            let available = if persist {
                 1
             } else {
-                self.peer_window as usize
+                self.cwnd
+                    .min(self.peer_window as usize)
+                    .saturating_sub(reserved)
             };
-            let n = self
-                .queued
-                .len()
-                .min(cfg.mss as usize)
-                .min(self.peer_mss as usize)
-                .min(window);
+
+            let n = self.queued.len().min(self.send_mss(cfg)).min(available);
+            if n == 0 {
+                return;
+            }
+
             let payload = self.queued.drain(..n).collect();
             self.start_flight(ACK | PSH, payload, persist, now);
-        } else if self.write_closed && self.peer_window > 0 {
-            self.start_flight(FIN | ACK, Vec::new(), false, now);
-            self.state = if self.state == TcpState::CloseWait {
-                TcpState::LastAck
-            } else {
-                TcpState::FinWait1
-            };
-        } else if self.write_closed && self.peer_window == 0 && now >= self.window_probe_at {
-            // An ACK at the preceding sequence requests a fresh window report.
-            // The close deadline bounds a peer that never reopens its window.
-            self.probe_pending = true;
+        } else if self.flights.is_empty() && self.write_closed {
+            if self.peer_window > 0 {
+                self.start_flight(FIN | ACK, Vec::new(), false, now);
+                self.state = if self.state == TcpState::CloseWait {
+                    TcpState::LastAck
+                } else {
+                    TcpState::FinWait1
+                };
+            } else if now >= self.window_probe_at {
+                self.probe_pending = true;
+            }
         }
     }
 
@@ -552,17 +756,68 @@ impl Connection {
         if self.state.is_terminal() {
             return Ok((false, false));
         }
+
         self.prepare(now, cfg);
-        let send_flight = self.flight.as_ref().is_some_and(|f| f.due(now));
+        // Only the oldest outstanding segment drives loss recovery. New segments
+        // use the remaining window; retransmissions never move send_sent backwards.
+        let mut flight_index = if self.flights.front().is_some_and(|f| f.due(now)) {
+            Some(0)
+        } else {
+            self.flights
+                .back()
+                .filter(|f| f.transmissions == 0)
+                .map(|_| self.flights.len() - 1)
+        };
+
+        if let Some(index) = flight_index {
+            if self.flights[index].transmissions == 0 && self.flights[index].flags & SYN == 0 {
+                // A device-blocked segment may outlive a window update or loss.
+                // Recheck both windows before submitting any previously unsent bytes.
+                let inflight = self.bytes_in_flight();
+                let persist = self.peer_window == 0 && inflight == 0;
+                let available = if persist {
+                    1
+                } else {
+                    self.cwnd
+                        .min(self.peer_window as usize)
+                        .saturating_sub(inflight)
+                };
+
+                let f = &mut self.flights[index];
+                if available == 0 || (persist && f.flags & FIN != 0) {
+                    flight_index = None;
+                    if persist && now >= self.window_probe_at {
+                        self.probe_pending = true;
+                    }
+                } else {
+                    if f.payload.len() > available {
+                        for byte in f.payload.drain(available..).rev() {
+                            self.queued.push_front(byte);
+                        }
+
+                        let removed = self.send_next.wrapping_sub(f.end()) as usize;
+                        self.flight_payload -= removed;
+                        self.send_next = f.end();
+                    }
+
+                    f.persist = persist;
+                }
+            }
+        }
+
+        let send_flight = flight_index.is_some();
+        self.device_blocked = false;
         if !send_flight && !self.ack_pending && !self.probe_pending {
             return Ok((false, false));
         }
         let Some(mut frame) = device.alloc() else {
+            self.device_blocked = true;
             return Ok((false, false));
         };
-        let window = (cfg.receive_capacity - self.received.len()) as u16;
+
+        let window = self.advertised_window(cfg);
         let (sequence, flags, payload) = if send_flight {
-            let flight = self.flight.as_ref().unwrap();
+            let flight = &self.flights[flight_index.unwrap()];
             (flight.sequence, flight.flags, flight.payload.as_slice())
         } else {
             let sequence = if self.probe_pending && !self.ack_pending {
@@ -572,6 +827,7 @@ impl Connection {
             };
             (sequence, ACK, &[][..])
         };
+
         tcp::build_ipv4(
             &mut frame,
             &Segment {
@@ -589,33 +845,72 @@ impl Connection {
                 payload,
             },
         )?;
+
         let n = match device.send(std::slice::from_mut(&mut frame)) {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
             result => result?,
         };
+
         if n == 0 {
+            self.device_blocked = true;
             return Ok((false, false));
         }
+
         let mut retransmitted = false;
-        if send_flight {
-            let flight = self.flight.as_mut().unwrap();
+        if let Some(index) = flight_index {
+            let inflight = self.bytes_in_flight();
+            let mss = self.send_mss(cfg);
+            let flight = &mut self.flights[index];
             retransmitted = flight.transmissions > 0;
             if retransmitted {
+                let timed_out = flight
+                    .last_sent
+                    .is_some_and(|at| now >= at.saturating_add(flight.rto));
+
+                self.syn_retransmitted |= flight.flags & SYN != 0;
                 flight.rto = flight.rto.saturating_mul(2).min(cfg.max_rto);
                 flight.rtt_eligible = false;
                 self.rto = flight.rto;
+
+                if !flight.persist && timed_out {
+                    // Repeated timeouts of this same segment retain ssthresh.
+                    if flight.transmissions == 1 {
+                        self.ssthresh = (inflight / 2).max(2 * mss);
+                    }
+                    self.cwnd = mss.min(cfg.max_cwnd_bytes);
+                    self.congestion_credit = 0;
+                    self.timeout_retransmissions = self.timeout_retransmissions.saturating_add(1);
+                }
             }
+
             flight.transmissions = flight.transmissions.saturating_add(1);
             flight.last_sent = Some(now);
-            self.send_sent = flight.end();
+            if before(self.send_sent, flight.end()) {
+                self.send_sent = flight.end();
+            }
+
+            if !flight.payload.is_empty() {
+                self.last_data_sent = Some(now);
+            }
+
+            if retransmitted {
+                // Karn: a cumulative ACK after loss cannot identify which send
+                // produced it, including other segments already in flight.
+                for f in &mut self.flights {
+                    f.rtt_eligible = false;
+                }
+            }
         }
+
         if flags & ACK != 0 {
             self.ack_pending = false;
         }
+
         if self.probe_pending {
             self.probe_pending = false;
             self.window_probe_at = now.saturating_add(self.rto);
         }
+
         Ok((true, retransmitted))
     }
 }
