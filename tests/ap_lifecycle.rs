@@ -74,7 +74,6 @@ fn restart_requires_association_and_preserves_unsent_ownership() {
     a.send(&mut tx).unwrap();
     ap.advance(Duration::from_secs(1)).unwrap();
     assert_eq!(b.recv(8, &mut Vec::new()).unwrap(), 1);
-    
 }
 
 #[test]
