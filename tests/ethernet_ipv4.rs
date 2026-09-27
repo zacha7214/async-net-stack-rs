@@ -68,18 +68,21 @@ impl Device for Wire {
             frame.as_mut_packet().copy_from_slice(&bytes);
             out.push(frame);
         }
+
         Ok(out.len())
     }
 
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         if self.fail_send {
-            return Err(io::Error::new(io::ErrorKind::Other, "scripted failure"));
+            return Err(io::Error::other("scripted failure"));
         }
+
         let n = frames.len().min(self.send_limit);
         for frame in &mut frames[..n] {
             self.sent.push(frame.as_slice().to_vec());
             drop(std::mem::take(frame));
         }
+
         Ok(n)
     }
 
@@ -90,10 +93,17 @@ impl Device for Wire {
     fn frame_size(&self) -> usize {
         self.pool.frame_size()
     }
+
 }
 
 fn interface() -> EthernetIpv4<Wire> {
-    EthernetIpv4::new(Wire::new(32), InterfaceConfig::new(LOCAL, 24, LOCAL_MAC)).unwrap()
+    EthernetIpv4::new(
+        Wire::new(32),
+        InterfaceConfig::new(
+        LOCAL, 
+        24,
+        LOCAL_MAC)
+    ).unwrap()
 }
 
 fn packet(interface: &mut EthernetIpv4<Wire>, destination: Ipv4Addr, value: u8) -> PacketBuf {
