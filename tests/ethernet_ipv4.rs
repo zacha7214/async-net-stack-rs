@@ -93,17 +93,10 @@ impl Device for Wire {
     fn frame_size(&self) -> usize {
         self.pool.frame_size()
     }
-
 }
 
 fn interface() -> EthernetIpv4<Wire> {
-    EthernetIpv4::new(
-        Wire::new(32),
-        InterfaceConfig::new(
-        LOCAL, 
-        24,
-        LOCAL_MAC)
-    ).unwrap()
+    EthernetIpv4::new(Wire::new(32), InterfaceConfig::new(LOCAL, 24, LOCAL_MAC)).unwrap()
 }
 
 fn packet(interface: &mut EthernetIpv4<Wire>, destination: Ipv4Addr, value: u8) -> PacketBuf {
