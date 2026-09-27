@@ -29,6 +29,12 @@ pub use tun_reactor::UtunReactor;
 /// methods can be expressed against `&self`; the device wrapper only needs
 /// `&mut self` to hand out exclusive [`PacketBuf`] handles.
 pub trait Device {
+    /// Advance protocol adapters with application-owned monotonic time. Raw
+    /// backends have no protocol timers. Call even while idle; recv still drives RX.
+    fn poll_at(&mut self, _now: std::time::Duration) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// Clear/recycle the previous `out`, then receive up to `max` frames.
     /// The device populates `out` with [`PacketBuf`]s
     /// backed by the device's own pool. For zero-copy backends, these may be

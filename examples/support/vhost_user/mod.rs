@@ -18,6 +18,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn bad(reason: impl Into<String>) -> Box<dyn std::error::Error> {
     io::Error::new(io::ErrorKind::InvalidData, reason.into()).into()
 }
+
 const FEATURES: u64 = (1 << 27) | (1 << 30) | (1 << 32) | (1 << 33) | (1 << 40);
 const PROTOCOL: u64 = (1 << 3) | (1 << 5) | (1 << 13);
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -30,16 +31,19 @@ extern "C" fn stop(_: libc::c_int) {
 struct Args {
     #[arg(long)]
     socket: PathBuf,
+
     /// Generated Ethernet frame size (excluding the 12-byte virtio header).
     #[arg(long, default_value_t = 1500)]
     size: usize,
     #[arg(long, default_value_t = 64)]
     batch: usize,
+
     /// Initial rate limit; zero runs without pacing. No packets before guest START.
     #[arg(long, default_value_t = 10000)]
     pps: u64,
     #[arg(long, default_value_t = 1000000000)]
     max_packets: u64,
+
     /// Include the first N frame GPA/IOVA samples in session output.
     #[arg(long, default_value_t = 8)]
     samples: usize,
@@ -162,6 +166,7 @@ impl Backend {
                 if m.body.len() < 8 {
                     return Err(bad("short memory table"));
                 }
+
                 let n = u32_at(&m.body, 0) as usize;
                 if n == 0 || n > 8 || u32_at(&m.body, 4) != 0 {
                     return Err(bad("memory table needs 1..=8 regions"));
@@ -197,6 +202,7 @@ impl Backend {
                         if !(2..=1024).contains(&value) || !value.is_power_of_two() {
                             return Err(bad("queue size must be power of two in 2..=1024"));
                         }
+
                         q.num = value as u16;
                         q.last_used = None;
                     }
@@ -204,6 +210,7 @@ impl Backend {
                         if value > u16::MAX as u32 {
                             return Err(bad("invalid split ring base"));
                         }
+
                         q.last_avail = value as u16;
                         q.last_used = None;
                     }
@@ -247,20 +254,24 @@ impl Backend {
                 if m.body.len() != 8 {
                     return Err(bad("short ring fd message"));
                 }
+
                 let value = u64_at(&m.body, 0);
                 if value & !0x1ff != 0 {
                     return Err(bad("invalid ring fd flags"));
                 }
+
                 let nofd = value & 0x100 != 0;
                 m.check(8, if nofd { 0 } else { 1 })?;
                 let q = self
                     .queues
                     .get_mut((value & 0xff) as usize)
                     .ok_or_else(|| bad("invalid queue fd index"))?;
+
                 let fd = m.fds.pop();
                 if let Some(f) = &fd {
                     queue::nonblocking(f)?;
                 }
+
                 match m.request {
                     12 => {
                         q.kick = fd;
@@ -325,6 +336,7 @@ impl Backend {
                     // queue is waiting for the same control-plane round trip.
                     return Ok(());
                 }
+
                 if self.protocol & PROTOCOL & ((1 << 3) | (1 << 5)) != ((1 << 3) | (1 << 5)) {
                     return Err(bad("IOTLB requires BACKEND_REQ and REPLY_ACK"));
                 }
@@ -337,6 +349,7 @@ impl Backend {
                     .as_mut()
                     .ok_or_else(|| bad("missing backend-request fd"))?
                     .send(1, false, &b)?;
+
                 self.pending_miss = Some((address, permission, Instant::now()));
 
                 Ok(())
@@ -379,6 +392,7 @@ impl Backend {
                     if count == 0 || count > a.max_packets {
                         return Err(bad("guest requested invalid packet count"));
                     }
+
                     self.previous_session = Some(id);
                     self.session = Some(Session {
                         id,
@@ -386,6 +400,7 @@ impl Backend {
                         generated: 0,
                         start: Instant::now(),
                     });
+
                     println!(
                         "{}",
                         json!({"event":"session_start", "session":id, "packets":count, "size":a.size, "pps":a.pps})
@@ -406,9 +421,11 @@ impl Backend {
             self.queues[1].publish(rings)?;
             self.tx_completed += completed as u64;
         }
+
         if let Some(e) = fault {
             self.fault(e)?;
         }
+
         Ok(completed)
     }
 
@@ -463,6 +480,7 @@ impl Backend {
                 frame_gpa(&self.spans).ok_or_else(|| bad("missing packet data span"))?;
             let header = vm_packet::header(*b"VD", s.generated, frame_gpa, a.size, s.id);
             generate(&self.spans, &header, s.generated, a.size);
+
             if s.generated < a.samples as u64 {
                 println!(
                     "{}",
@@ -500,18 +518,22 @@ impl Backend {
 
 fn frame_gpa(spans: &[Span]) -> Option<u64> {
     let mut skip = 12;
+
     for s in spans {
         if skip < s.len {
             return Some(s.gpa + skip as u64);
         }
         skip -= s.len;
     }
+
     None
 }
+
 fn generate(spans: &[Span], header: &[u8; vm_packet::HEADER], sequence: u64, size: usize) {
     let mut offset = 0;
     for s in spans {
         let n = s.len.min(size + 12 - offset);
+
         for i in 0..n {
             let p = offset + i;
             let byte = if p < 12 {
@@ -526,6 +548,7 @@ fn generate(spans: &[Span], header: &[u8; vm_packet::HEADER], sequence: u64, siz
                 s.ptr.add(i).write(byte);
             }
         }
+
         offset += n;
         if offset == size + 12 {
             break;
@@ -551,10 +574,12 @@ pub fn main() -> Result<()> {
             "size 64..=1514, batch 1..=256, samples <=64, pps <=100000000 required",
         ));
     }
+
     unsafe {
         libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
     }
+
     // Refuse to unlink an existing socket. Use a private directory for the lab.
     let listener = UnixListener::bind(&a.socket)?;
     let _guard = SocketGuard(a.socket.clone());
@@ -563,6 +588,7 @@ pub fn main() -> Result<()> {
         "listening on {}; waiting for QEMU, then guest START",
         a.socket.display()
     );
+
     let stream = loop {
         match listener.accept() {
             Ok((s, _)) => break s,
@@ -575,6 +601,7 @@ pub fn main() -> Result<()> {
             Err(e) => return Err(e.into()),
         }
     };
+
     let mut wire = Wire::new(stream)?;
     let mut backend = Backend::new();
     let mut fds = Vec::with_capacity(4);
@@ -586,12 +613,15 @@ pub fn main() -> Result<()> {
                 None => break,
             }
         }
+
         if wire.eof {
             break;
         }
+
         if let Some(c) = &mut backend.channel {
             c.flush()?;
         }
+
         let work = backend.tx(&a)? + backend.rx(&a)?;
         fds.clear();
         fds.push(libc::pollfd {
@@ -599,6 +629,7 @@ pub fn main() -> Result<()> {
             events: libc::POLLIN | if wire.wants_write() { libc::POLLOUT } else { 0 },
             revents: 0,
         });
+
         if let Some(c) = &backend.channel {
             fds.push(libc::pollfd {
                 fd: c.stream.as_raw_fd(),
@@ -606,6 +637,7 @@ pub fn main() -> Result<()> {
                 revents: 0,
             });
         }
+
         let first_kick = fds.len();
         for q in &backend.queues {
             if let Some(k) = &q.kick {
@@ -616,6 +648,7 @@ pub fn main() -> Result<()> {
                 });
             }
         }
+
         let timeout = if work > 0 || (backend.session.is_some() && a.pps == 0) {
             0
         } else if backend.session.is_some() {
@@ -623,6 +656,7 @@ pub fn main() -> Result<()> {
         } else {
             50
         };
+
         let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
         if n < 0 {
             let e = io::Error::last_os_error();
@@ -630,6 +664,7 @@ pub fn main() -> Result<()> {
                 return Err(e.into());
             }
         }
+
         let mut index = first_kick;
         for q in &backend.queues {
             if let Some(k) = &q.kick {
@@ -640,11 +675,13 @@ pub fn main() -> Result<()> {
             }
         }
     }
+
     println!(
         "{}",
         json!({"event":"backend_stopped", "rx_completed":backend.rx_completed, "tx_completed":backend.tx_completed,
         "iotlb_updates":backend.iotlb_updates, "iotlb_invalidations":backend.iotlb_invalidations, "queue_stops":backend.queue_stops,
         "rx_notifications":backend.queues[0].notifications, "tx_notifications":backend.queues[1].notifications})
     );
+
     Ok(())
 }

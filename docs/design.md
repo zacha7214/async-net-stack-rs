@@ -90,8 +90,9 @@ advisory and do not pin a worker to an exact CPU.
 
 1. A shared XSKMAP/program manager and one worker per RX queue, with explicit RSS
    steering. Separate devices cannot each attach their own program to one NIC.
-2. A bounded ARP/neighbor cache and routing table, with timers and packet queues
-   that retain handles safely under backpressure.
+2. Extend the [Ethernet/IPv4 adapter](ethernet-ipv4.md), which now supplies bounded
+   ARP/neighbor state, static routing, virtual timers and packet queues. Follow-ups
+   include VLAN-aware interfaces, multiple local addresses and ICMP error dispatch.
 3. UDP socket demultiplexing and an executor-facing readiness API. Keep timeout
    ownership separate from device buffers before introducing TCP connection state.
 4. Multi-buffer XDP: capability negotiation, descriptor continuation chains,

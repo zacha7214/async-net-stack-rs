@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         interface: String,
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=200))]
         workers: u8,
+        /// Zero runs until SIGINT/SIGTERM, suitable for a managed service.
         #[arg(long, default_value_t = 30)]
         seconds: u64,
     }
@@ -60,7 +61,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let start = Instant::now();
-    while !STOP.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(args.seconds) {
+    while !STOP.load(Ordering::Relaxed)
+        && (args.seconds == 0 || start.elapsed() < Duration::from_secs(args.seconds))
+    {
         let n = pool.poll(start.elapsed(), Duration::from_secs(5), 64, |_| {
             Action::Echo
         })?;

@@ -1,0 +1,15 @@
+[Unit]
+Description=Isolated UDP network environment (%i)
+Before=async-net-stack@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/async-net-stack-rs
+ExecStart=/usr/bin/python3 /opt/async-net-stack-rs/scripts/udp-system-lab.py up --name %i
+ExecStop=/usr/bin/python3 /opt/async-net-stack-rs/scripts/udp-system-lab.py down --name %i
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

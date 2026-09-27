@@ -1,0 +1,23 @@
+[Unit]
+Description=Userspace UDP stack (%i)
+Requires=async-net-lab@%i.service
+After=async-net-lab@%i.service
+PartOf=async-net-lab@%i.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/async-net-stack-rs
+ExecStart=/usr/bin/python3 /opt/async-net-stack-rs/scripts/udp-system-lab.py stack --name %i
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+# Namespace entry and TUN setup require privilege. Do not use PrivateNetwork:
+# the launcher explicitly enters the existing, isolated lab namespace.
+# No WatchdogSec until the stack supports real sd_notify progress reporting.
+
+[Install]
+WantedBy=multi-user.target
