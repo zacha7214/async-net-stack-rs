@@ -20,8 +20,8 @@ needed on the builder. QEMU runs on the host after bundle export.
 For Multipass, install the added userspace prerequisites once inside the builder:
 
 ```sh
-multipass exec tito-burrito -- sudo apt-get update
-multipass exec tito-burrito -- sudo apt-get install -y \
+multipass exec <mutilpass instance name> -- sudo apt-get update
+multipass exec <mutilpass instance name> -- sudo apt-get install -y \
   iproute2 iw hostapd wpasupplicant wireless-regdb
 ```
 
@@ -29,7 +29,7 @@ Then rebuild, export and run the test from the checkout:
 
 ```sh
 python3 scripts/qemu-lab.py --rebuild --test wifi \
-  --builder multipass --instance tito-burrito \
+  --builder multipass --instance <mutilpass instance name> \
   --source /home/ubuntu/arm64_dev_kernel
 ```
 

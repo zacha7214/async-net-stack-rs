@@ -3,7 +3,7 @@
 #[cfg(all(target_os = "linux", feature = "tun"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use async_net_stack_rs::{
-        api::{Action, Service, UdpPool},
+        api::{Action, Service, UdpConfig, UdpPool},
         device::DefaultDevice,
     };
 
@@ -22,6 +22,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// Zero runs until SIGINT/SIGTERM, suitable for a managed service.
         #[arg(long, default_value_t = 30)]
         seconds: u64,
+        /// Round robin across remote IP:port pairs.
+        #[arg(long)]
+        fair_queue: bool,
+        #[arg(long, default_value_t = 128)]
+        queue_capacity: usize,
+        #[arg(long, default_value_t = 128)]
+        per_peer_capacity: usize,
+        /// Optional global IPv4 byte rate (headers included).
+        #[arg(long)]
+        bytes_per_second: Option<u64>,
+        #[arg(long)]
+        per_peer_bytes_per_second: Option<u64>,
+        /// Expiry of UDP-owned queue entries; device queues are a separate stage.
+        #[arg(long)]
+        queue_deadline_ms: Option<u64>,
+        /// Collect bounded outcome events; print on shutdown, outside the loop.
+        #[arg(long, default_value_t = 0)]
+        event_capacity: usize,
     }
 
     // The launcher terminates us after the client finishes. Preserve counters
@@ -52,7 +70,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device.name()?,
         args.workers + 1
     );
-    let mut pool = UdpPool::new(device, 128, 256)?;
+
+    let mut pool = UdpPool::with_config(
+        device,
+        UdpConfig {
+            queue_capacity: args.queue_capacity,
+            peer_capacity: 256,
+            per_peer_capacity: args.per_peer_capacity,
+            max_tx_peers: args.queue_capacity,
+            tx_budget: args.queue_capacity,
+            fair_queue: args.fair_queue,
+            bytes_per_second: args.bytes_per_second,
+            per_peer_bytes_per_second: args.per_peer_bytes_per_second,
+            queue_lifetime: args.queue_deadline_ms.map(Duration::from_millis),
+            event_capacity: args.event_capacity,
+            ..UdpConfig::default()
+        },
+    )?;
+
     for i in 0..args.workers {
         pool.bind(Service {
             address: SocketAddrV4::new(Ipv4Addr::new(10, 77, 0, i + 2), 9000),
@@ -67,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let n = pool.poll(start.elapsed(), Duration::from_secs(5), 64, |_| {
             Action::Echo
         })?;
+
         if n == 0 && pool.pending() == 0 {
             std::thread::sleep(Duration::from_micros(50));
         } else {
@@ -75,6 +111,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("{:?}; pending={}", pool.stats(), pool.pending());
+    while let Some(event) = pool.pop_event() {
+        println!("{event:?}");
+    }
 
     Ok(())
 }

@@ -301,7 +301,7 @@ class DockerBuilder(Builder):
         _run([self.engine, 'cp', f'{self.container}:{remote_dir}', str(local_parent)], check=True)
 
 
-def add_arguments(parser, default_instance='tito-burrito'):
+def add_arguments(parser, default_instance='tito-domingo'):
     """The builder selection flags, shared by every script that needs one."""
     group = parser.add_argument_group('builder')
     group.add_argument('--builder', choices=KINDS, default='multipass',
