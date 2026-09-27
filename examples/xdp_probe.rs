@@ -125,6 +125,7 @@ fn main() {
                 println!("zero-copy:      NOT ACTIVE in this configuration (copy mode selected)");
                 println!("copy mode:      WORKS (bind ok)");
             }
+
             println!(
                 "need-wakeup:    {}",
                 if sock.need_wakeup_enabled() {
@@ -145,6 +146,7 @@ fn main() {
             std::process::exit(1);
         }
     }
+
     drop(umem);
 
     println!(

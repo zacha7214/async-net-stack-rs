@@ -123,6 +123,7 @@ struct Pending {
 pub struct EthernetIpv4<D> {
     device: D,
     config: InterfaceConfig,
+    configured: bool,
     routes: RouteTable,
     neighbors: BTreeMap<Ipv4Addr, NeighborState>,
     pending: VecDeque<Pending>,
@@ -181,6 +182,7 @@ impl<D: Device> EthernetIpv4<D> {
         routes.insert(connected)?;
         Ok(Self {
             device,
+            configured: true,
             routes,
             neighbors: BTreeMap::new(),
             pending: VecDeque::with_capacity(config.tx_capacity),
@@ -194,6 +196,67 @@ impl<D: Device> EthernetIpv4<D> {
             now: Duration::ZERO,
             stats: InterfaceStats::default(),
         })
+    }
+
+    /// Replace the single local IPv4 address and connected/default routes.
+    /// Validates fully before mutation. Custom routes and all neighbors are
+    /// cleared on change. An identical renewal is a no-op. Device-owned TX
+    /// cannot be revoked; queued adapter packets are counted as configuration drops.
+    pub fn configure_ipv4(
+        &mut self,
+        address: Ipv4Addr,
+        prefix: u8,
+        gateway: Option<Ipv4Addr>,
+    ) -> io::Result<bool> {
+        if !route::unicast(address) {
+            return Err(invalid("invalid local address"));
+        }
+        let connected = Route::new(address, prefix, None)?;
+        let broadcast = Ipv4Addr::from(u32::from(connected.network()) | !route::mask(prefix));
+        if prefix <= 30 && (address == connected.network() || address == broadcast) {
+            return Err(invalid("local address is network/broadcast"));
+        }
+        if gateway.is_some_and(|ip| {
+            !route::unicast(ip)
+                || ip == address
+                || !connected.contains(ip)
+                || (prefix <= 30 && (ip == connected.network() || ip == broadcast))
+        }) {
+            return Err(invalid(
+                "gateway must be a distinct on-link unicast address",
+            ));
+        }
+        let mut routes = RouteTable::new(self.config.route_capacity);
+        routes.insert(connected)?;
+        if let Some(ip) = gateway {
+            routes.insert(Route::new(Ipv4Addr::UNSPECIFIED, 0, Some(ip))?)?;
+        }
+        if self.configured
+            && self.config.address == address
+            && self.config.prefix_len == prefix
+            && self.routes.entries().eq(routes.entries())
+        {
+            return Ok(false);
+        }
+        self.discard_queued();
+        self.neighbors.clear();
+        self.routes = routes;
+        self.config.address = address;
+        self.config.prefix_len = prefix;
+        self.configured = true;
+        Ok(true)
+    }
+
+    /// Withdraw an expired lease. Suppresses IPv4 and ARP replies until configured
+    /// again. Native DHCP bootstrap traffic is not implemented by this adapter.
+    pub fn withdraw_ipv4(&mut self) {
+        self.discard_queued();
+        self.neighbors.clear();
+        self.routes = RouteTable::new(self.config.route_capacity);
+        self.configured = false;
+    }
+    pub fn is_configured(&self) -> bool {
+        self.configured
     }
 
     pub fn config(&self) -> &InterfaceConfig {
@@ -586,6 +649,10 @@ impl<D: Device> EthernetIpv4<D> {
     }
 
     fn receive_frame(&mut self, mut frame: PacketBuf, out: &mut Vec<PacketBuf>) {
+        if !self.configured {
+            self.stats.ignored += 1;
+            return;
+        }
         let Some((destination_mac, source_mac, kind)) = eth::parse(frame.as_slice()) else {
             self.stats.malformed += 1;
             return;
@@ -652,6 +719,12 @@ impl<D: Device> Device for EthernetIpv4<D> {
     }
 
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
+        if !self.configured {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "IPv4 configuration withdrawn",
+            ));
+        }
         let available = self.config.tx_capacity - self.pending.len() - self.ready.len();
         let limit = available.min(frames.len());
 

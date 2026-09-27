@@ -190,7 +190,7 @@ too slow for a kernel compile.
 
 ```sh
 python3 scripts/kernel-lab-build.py \
-  --instance tito-burrito \
+  --instance tito-domingo \
   --source /home/ubuntu/arm64_dev_kernel \
   --output results/kernel-lab
 ```
