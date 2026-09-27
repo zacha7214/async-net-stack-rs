@@ -144,6 +144,7 @@ impl Device for TunDevice {
             let Some(mut buf) = self.alloc() else {
                 break; // pool exhausted
             };
+
             match read_datagram(self.fd.as_raw_fd(), &mut buf) {
                 Ok(Some(_)) => out.push(buf),
                 // EWOULDBLOCK or EOF: `buf` is dropped here and recycled.
@@ -178,6 +179,7 @@ impl Device for TunDevice {
         if sent > 0 {
             return Ok(sent);
         }
+
         match err {
             Some(e) => Err(e),
             None => Ok(0),

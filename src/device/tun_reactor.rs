@@ -130,6 +130,7 @@ pub fn pin_thread_to_core(core: usize) -> io::Result<()> {
         // Tag 0 means "no affinity"; use `core + 1` as a best-effort hint.
         affinity_tag: (core as libc::integer_t).wrapping_add(1),
     };
+
     // SAFETY: `policy` is a valid `thread_affinity_policy` for the
     // `THREAD_AFFINITY_POLICY` flavor, applied to the calling thread.
     let result = unsafe {
@@ -140,6 +141,7 @@ pub fn pin_thread_to_core(core: usize) -> io::Result<()> {
             libc::THREAD_AFFINITY_POLICY_COUNT,
         )
     };
+
     if result != libc::KERN_SUCCESS {
         // `result` is a mach kern_return, not an errno — keep it as a message,
         // not a bogus OS error.
@@ -147,6 +149,7 @@ pub fn pin_thread_to_core(core: usize) -> io::Result<()> {
             "thread_policy_set returned kern_return {result}"
         )));
     }
+
     Ok(())
 }
 
@@ -186,6 +189,7 @@ where
             handler(shard, &mut device, &mut rx);
         }
     }
+
     Ok(())
 }
 
@@ -198,6 +202,7 @@ impl Kqueue {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+
         // SAFETY: `fd >= 0` and freshly created.
         Ok(Self(unsafe { OwnedFd::from_raw_fd(fd) }))
     }
@@ -209,6 +214,7 @@ impl Kqueue {
         ev.filter = libc::EVFILT_READ;
         ev.flags = libc::EV_ADD | libc::EV_ENABLE;
         ev.udata = udata as *mut libc::c_void;
+
         // SAFETY: `ev` is a valid change entry for this kqueue.
         let ret = unsafe {
             libc::kevent(
@@ -220,9 +226,11 @@ impl Kqueue {
                 std::ptr::null(),
             )
         };
+
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
+
         Ok(())
     }
 
@@ -233,10 +241,12 @@ impl Kqueue {
             tv_sec: d.as_secs() as libc::time_t,
             tv_nsec: d.subsec_nanos() as libc::c_long,
         });
+
         let timeout_ptr = match &ts {
             Some(t) => t as *const libc::timespec,
             None => std::ptr::null(),
         };
+
         // SAFETY: `events` is a valid output buffer of `nevents` entries.
         let ret = unsafe {
             libc::kevent(
@@ -248,15 +258,18 @@ impl Kqueue {
                 timeout_ptr,
             )
         };
+
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
+
         Ok(ret as usize)
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::{pin_thread_to_core, Kqueue};
     use std::time::Duration;
 
@@ -268,8 +281,8 @@ mod tests {
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) },
             0
         );
-        let (read_end, write_end) = (fds[0], fds[1]);
 
+        let (read_end, write_end) = (fds[0], fds[1]);
         let kq = Kqueue::new().unwrap();
         kq.register_read(read_end, 0xCAFE).unwrap();
 
@@ -283,11 +296,13 @@ mod tests {
 
         // One datagram -> exactly one readable event, tagged with our udata.
         let msg = b"x";
+
         // SAFETY: `msg` is a valid 1-byte buffer to write.
         assert_eq!(
             unsafe { libc::write(write_end, msg.as_ptr() as *const libc::c_void, msg.len()) },
             1
         );
+
         let n = kq.wait(&mut events, Some(Duration::from_secs(1))).unwrap();
         assert_eq!(n, 1);
         assert_eq!(events[0].filter, libc::EVFILT_READ);
@@ -302,6 +317,7 @@ mod tests {
     }
 
     #[test]
+
     fn affinity_hint_is_best_effort() {
         // On Apple Silicon the legacy affinity policy returns KERN_NOT_SUPPORTED;
         // on older Intel macOS it may succeed. The contract is only that the

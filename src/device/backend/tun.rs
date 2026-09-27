@@ -51,9 +51,11 @@ pub(crate) fn set_ifname(dst: &mut [c_char], name: &str) {
         "interface name `{name}` too long (max {} bytes)",
         dst.len() - 1
     );
+
     for (d, b) in dst.iter_mut().zip(bytes) {
         *d = *b as c_char;
     }
+
     dst[bytes.len()] = 0;
 }
 
@@ -65,10 +67,12 @@ pub(crate) fn set_nonblocking(fd: RawFd) -> Result<(), Error> {
     if flags < 0 {
         return Err(Error::FCntl(io::Error::last_os_error()));
     }
+
     // SAFETY: `flags` came from F_GETFL; OR-ing O_NONBLOCK is valid for F_SETFL.
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(Error::FCntl(io::Error::last_os_error()));
     }
+
     Ok(())
 }
 
@@ -84,6 +88,7 @@ pub(crate) fn set_nonblocking(fd: RawFd) -> Result<(), Error> {
 pub(crate) fn read_datagram(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option<usize>> {
     let off = buf.data_offset();
     let room = buf.capacity() - off;
+
     // SAFETY: `buf` exclusively owns its frame; we read into `[off, off + room)`.
     let n = loop {
         let n = unsafe {
@@ -93,11 +98,14 @@ pub(crate) fn read_datagram(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option
                 room,
             )
         };
+
         if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
             continue;
         }
+
         break n;
     };
+
     if n < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::WouldBlock {
@@ -105,10 +113,12 @@ pub(crate) fn read_datagram(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option
         }
         return Err(e);
     }
+
     if n == 0 {
         // EOF / device closed.
         return Ok(None);
     }
+
     let n = n as usize;
     if n == room {
         // A datagram that fills the entire frame was (almost certainly)
@@ -120,6 +130,7 @@ pub(crate) fn read_datagram(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option
             "datagram truncated: frame smaller than interface MTU",
         ));
     }
+
     buf.set_len(n);
     Ok(Some(n))
 }
@@ -132,6 +143,7 @@ pub(crate) fn read_datagram(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option
 #[inline]
 pub(crate) fn write_datagram(fd: RawFd, buf: &PacketBuf) -> io::Result<()> {
     let data = buf.as_slice();
+
     // SAFETY: `data` is a valid slice of `buf`'s frame.
     let n = loop {
         let n = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
@@ -140,15 +152,18 @@ pub(crate) fn write_datagram(fd: RawFd, buf: &PacketBuf) -> io::Result<()> {
         }
         break n;
     };
+
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
+
     if n as usize != data.len() {
         return Err(io::Error::new(
             io::ErrorKind::WriteZero,
             "short datagram write",
         ));
     }
+
     Ok(())
 }
 

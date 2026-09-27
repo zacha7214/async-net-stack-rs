@@ -1,6 +1,7 @@
 //! Initial TCP echo server over TUN or AF_XDP + userspace Ethernet/ARP/routing.
 //!
 //! Linux TUN: cargo run --features tun --example tcp_echo -- --iface labtun
+//! macOS TUN: use --utun-unit 0 for automatic allocation; read the printed name.
 //! Configure the printed TUN interface from another shell, as for echo_server.
 //! Isolated XDP NIC: add --backend xdp --iface eth1 --mac 02:00:00:00:00:20
 //! --ip 192.168.1.20 --prefix 24 [--gateway 192.168.1.1] [--generic].
@@ -27,8 +28,14 @@ use std::{
 struct Args {
     #[arg(long, default_value = "tun")]
     backend: String,
+    /// Linux interface name, used verbatim (e.g. tun0 or labtun).
+    #[cfg(not(target_os = "macos"))]
     #[arg(long, default_value = "labtun")]
     iface: String,
+    /// macOS kernel-control unit: 0 auto-allocates; N > 0 requests utun(N-1).
+    #[cfg(target_os = "macos")]
+    #[arg(long, default_value_t = 0)]
+    utun_unit: u32,
     #[arg(long, default_value = "10.9.0.2")]
     ip: Ipv4Addr,
     #[arg(long, default_value_t = 24)]
@@ -86,8 +93,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.backend.as_str() {
         #[cfg(all(feature = "tun", any(target_os = "linux", target_os = "macos")))]
         "tun" => {
-            let device =
-                async_net_stack_rs::device::DefaultDevice::new(args.iface.parse::<u32>()?)?;
+            #[cfg(target_os = "linux")]
+            let device = async_net_stack_rs::device::DefaultDevice::new(&args.iface)?;
+
+            #[cfg(target_os = "macos")]
+            let device = async_net_stack_rs::device::DefaultDevice::new(args.utun_unit)?;
             eprintln!(
                 "TUN interface: {}; configure its address/link before connecting",
                 device.name()?
@@ -115,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut config = InterfaceConfig::new(args.ip, args.prefix, mac);
             config.event_capacity = 128;
+
             let mut interface = EthernetIpv4::new(device, config)?;
             if let Some(gateway) = args.gateway {
                 interface.set_gateway(gateway)?;

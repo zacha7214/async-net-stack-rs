@@ -53,7 +53,9 @@ impl UtunDevice {
         Self::new_with_mtu(unit, DEFAULT_MTU)
     }
 
-    /// Open `utun{unit}` and size the frame pool for datagrams up to `mtu` bytes
+    /// Open a utun device using the raw kernel-control unit: 0 auto-allocates;
+    /// a positive unit N requests `utun{N-1}` (not the OS interface index).
+    /// Size the frame pool for datagrams up to `mtu` bytes
     /// (pass 9000 for jumbo frames; the interface MTU itself is still configured
     /// separately via `ifconfig`).
     ///
@@ -86,7 +88,7 @@ impl UtunDevice {
             return Err(Error::IoctlFailed(io::Error::last_os_error()));
         }
 
-        // Attach this socket to utun{unit}.
+        // sc_unit 0 auto-allocates; a positive N requests utun(N-1).
         let addr = libc::sockaddr_ctl {
             sc_len: size_of::<libc::sockaddr_ctl>() as c_uchar,
             sc_family: libc::AF_SYSTEM as c_uchar,
@@ -135,6 +137,7 @@ impl UtunDevice {
         {
             return Err(Error::GetSockOpt(io::Error::last_os_error()));
         }
+
         // SAFETY: `name` is zero-initialized, so it always contains a NUL within
         // its 256 bytes; the kernel's name is NUL-terminated.
         let cstr = unsafe { CStr::from_ptr(name.as_ptr() as *const c_char) };
@@ -147,6 +150,7 @@ impl UtunDevice {
         if fd < 0 {
             return Err(Error::CreateSocket(io::Error::last_os_error()));
         }
+
         // SAFETY: `fd >= 0` and freshly created.
         let ctl = unsafe { OwnedFd::from_raw_fd(fd) };
 
@@ -156,6 +160,7 @@ impl UtunDevice {
         if unsafe { libc::ioctl(ctl.as_raw_fd(), SIOCGIFMTU, &mut ifr) } < 0 {
             return Err(Error::IoctlFailed(io::Error::last_os_error()));
         }
+
         // SAFETY: kernel filled `ifru_mtu` on success.
         Ok(unsafe { ifr.ifr_ifru.ifru_mtu } as usize)
     }
@@ -175,12 +180,14 @@ fn read_packet(fd: RawFd, buf: &mut PacketBuf) -> io::Result<Option<usize>> {
     let Some(n) = read_datagram(fd, buf)? else {
         return Ok(None);
     };
+
     if n < 4 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "short utun datagram (missing address-family header)",
         ));
     }
+
     buf.pull_header(4);
     Ok(Some(n - 4))
 }
@@ -194,6 +201,7 @@ fn family_for(buf: &PacketBuf) -> io::Result<u32> {
             "cannot send an empty datagram",
         ));
     };
+
     match first >> 4 {
         4 => Ok(libc::AF_INET as u32),
         6 => Ok(libc::AF_INET6 as u32),
@@ -219,6 +227,7 @@ fn write_packet(fd: RawFd, buf: &PacketBuf) -> io::Result<()> {
             iov_len: data.len(),
         },
     ];
+
     loop {
         let n = unsafe { libc::writev(fd, iov.as_ptr(), 2) };
         if n >= 0 {
@@ -243,6 +252,7 @@ impl Device for UtunDevice {
             let Some(mut buf) = self.alloc() else {
                 break; // pool exhausted
             };
+
             match read_packet(self.fd.as_raw_fd(), &mut buf) {
                 Ok(Some(_)) => out.push(buf),
                 // EWOULDBLOCK or EOF: `buf` is dropped here and recycled.
@@ -277,6 +287,7 @@ impl Device for UtunDevice {
         if sent > 0 {
             return Ok(sent);
         }
+
         match err {
             Some(e) => Err(e),
             None => Ok(0),
@@ -299,6 +310,7 @@ impl Device for UtunDevice {
 
 #[cfg(test)]
 mod tests {
+
     use super::family_for;
     use crate::device::buffer_pool::FramePool;
 
@@ -320,7 +332,9 @@ mod tests {
 
 #[cfg(test)]
 mod write_tests {
+
     use super::*;
+
     #[test]
     fn family_prefix_is_network_order_and_headroom_is_unchanged() {
         let (sender, receiver) = std::os::unix::net::UnixDatagram::pair().unwrap();
@@ -331,6 +345,7 @@ mod write_tests {
         buf.as_mut_packet().fill(0);
         buf.as_mut_packet()[0] = 0x45;
         write_packet(sender.as_raw_fd(), &buf).unwrap();
+
         let mut data = [0; 32];
         assert_eq!(receiver.recv(&mut data).unwrap(), 24);
         assert_eq!(&data[..4], &(libc::AF_INET as u32).to_be_bytes());
