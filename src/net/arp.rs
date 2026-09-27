@@ -30,6 +30,7 @@ impl Packet {
             2 => Operation::Reply,
             _ => return None,
         };
+
         Some(Self {
             operation,
             sender_mac: bytes[8..14].try_into().ok()?,
@@ -49,10 +50,12 @@ impl Packet {
             })
             .to_be_bytes(),
         );
+
         bytes[8..14].copy_from_slice(&self.sender_mac);
         bytes[14..18].copy_from_slice(&self.sender_ip.octets());
         bytes[18..24].copy_from_slice(&self.target_mac);
         bytes[24..28].copy_from_slice(&self.target_ip.octets());
+
         bytes
     }
 }

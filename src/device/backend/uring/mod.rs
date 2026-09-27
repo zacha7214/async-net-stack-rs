@@ -25,6 +25,7 @@ impl Default for UringConfig {
         }
     }
 }
+
 impl UringConfig {
     fn validate(self) -> io::Result<()> {
         if !self.entries.is_power_of_two()
@@ -39,6 +40,7 @@ impl UringConfig {
         Ok(())
     }
 }
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UringStats {
     pub enter_calls: u64,
@@ -52,6 +54,7 @@ pub struct UringStats {
     pub submit_errors: u64,
     pub last_errno: Option<i32>,
 }
+
 struct Pending {
     buf: PacketBuf,
     read: bool,
@@ -72,16 +75,19 @@ pub struct UringTunDevice {
     stats: UringStats,
     error: Option<io::Error>,
 }
+
 impl UringTunDevice {
     pub fn new(name: &str, mtu: usize, cfg: UringConfig) -> Result<Self, Error> {
         cfg.validate()?;
         Self::from_tun(DefaultDevice::new_with_mtu(name, mtu)?, cfg).map_err(Error::from)
     }
+
     pub fn from_tun(tun: DefaultDevice, cfg: UringConfig) -> io::Result<Self> {
         cfg.validate()?;
         let (fd, name, pool) = tun.into_io_parts();
         Self::from_parts(fd, name, pool, cfg)
     }
+
     fn from_parts(
         fd: OwnedFd,
         name: String,
@@ -95,6 +101,7 @@ impl UringTunDevice {
                 "RX depth must leave frames for TX",
             ));
         }
+
         let ring = Ring::new(cfg.entries as u32, fd.as_raw_fd())?;
         let entries = ring.entries();
         Ok(Self {
@@ -112,15 +119,19 @@ impl UringTunDevice {
             error: None,
         })
     }
+
     pub fn name(&self) -> &str {
         &self.name
     }
+
     pub fn stats(&self) -> UringStats {
         self.stats
     }
+
     pub fn pending_tx(&self) -> usize {
         self.tx_pending
     }
+
     /// Submit queued work and reap completions. Never waits for RX traffic or
     /// TX space. Call regularly, including after the last send, to reap TX.
     pub fn progress(&mut self) -> io::Result<()> {
@@ -128,6 +139,7 @@ impl UringTunDevice {
         if let Some(err) = self.error.take() {
             return Err(err);
         }
+
         if self.free.len() < self.pending.len() {
             self.stats.enter_calls += 1;
             if let Err(err) = self.ring.submit() {
@@ -137,17 +149,21 @@ impl UringTunDevice {
             }
             self.reap();
         }
+
         if let Some(err) = self.error.take() {
             return Err(err);
         }
+
         Ok(())
     }
+
     fn record_error(&mut self, err: io::Error) {
         self.stats.last_errno = err.raw_os_error();
         if self.error.is_none() {
             self.error = Some(err);
         }
     }
+
     fn reap(&mut self) {
         while let Some(cqe) = self.ring.pop() {
             let id = cqe.user_data as usize;
@@ -156,17 +172,20 @@ impl UringTunDevice {
                 .get_mut(id)
                 .and_then(Option::take)
                 .expect("kernel returned a live request id");
+
             self.free.push(id);
             if op.read {
                 self.rx_pending -= 1;
             } else {
                 self.tx_pending -= 1;
             }
+
             if cqe.result < 0 {
                 let errno = -cqe.result;
                 if op.read && matches!(errno, libc::EAGAIN | libc::EINTR) {
                     continue;
                 }
+
                 if op.read {
                     self.stats.rx_errors += 1;
                 } else {
@@ -196,8 +215,10 @@ impl UringTunDevice {
                 self.stats.tx_completed_bytes += cqe.result as u64;
             }
         }
+
         self.ring.release_completions();
     }
+
     fn queue(&mut self, mut buf: PacketBuf, read: bool) {
         let id = self.free.pop().expect("space checked");
         let offset = buf.data_offset();
@@ -213,6 +234,7 @@ impl UringTunDevice {
             user_data: id as u64,
             ..Sqe::default()
         });
+
         if read {
             self.rx_pending += 1;
             self.stats.rx_submitted += 1;
@@ -222,11 +244,13 @@ impl UringTunDevice {
         }
     }
 }
+
 impl AsRawFd for UringTunDevice {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
+
 impl Device for UringTunDevice {
     fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> io::Result<usize> {
         out.clear();
@@ -234,6 +258,7 @@ impl Device for UringTunDevice {
         if let Some(err) = self.error.take() {
             return Err(err);
         }
+
         while self.rx_pending + self.ready.len() < self.cfg.rx_depth
             && !self.free.is_empty()
             && self.ring.free_slots() > 0
@@ -241,23 +266,29 @@ impl Device for UringTunDevice {
             let Some(idx) = self.pool.alloc() else {
                 break;
             };
+
             self.queue(self.pool.packet_buf(idx, 0), true);
         }
+
         self.progress()?;
         for _ in 0..max.min(self.ready.len()) {
             out.push(self.ready.pop_front().unwrap());
         }
+
         Ok(out.len())
     }
+
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         self.reap();
         if let Some(err) = self.error.take() {
             return Err(err);
         }
+
         let n = frames
             .len()
             .min(self.free.len())
             .min(self.ring.free_slots());
+
         if frames[..n]
             .iter()
             .any(|f| f.is_empty() || f.len() > u32::MAX as usize)
@@ -267,27 +298,34 @@ impl Device for UringTunDevice {
                 "invalid io_uring TX frame",
             ));
         }
+
         for frame in &mut frames[..n] {
             self.queue(std::mem::take(frame), false);
         }
+
         // Once accepted, buffers stay owned by this backend even if enter
         // fails. Report the deferred failure on the next progress/recv/send.
         if let Err(err) = self.progress() {
             self.error = Some(err);
         }
+
         Ok(n)
     }
+
     fn alloc(&mut self) -> Option<PacketBuf> {
         let idx = self.pool.alloc()?;
         Some(self.pool.packet_buf(idx, 0))
     }
+
     fn alloc_batch(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
         self.pool.alloc_batch(max, out)
     }
+
     fn frame_size(&self) -> usize {
         self.pool.frame_size()
     }
 }
+
 impl Drop for UringTunDevice {
     fn drop(&mut self) {
         // A close alone is insufficient: io_uring teardown can be asynchronous.
@@ -306,19 +344,23 @@ impl Drop for UringTunDevice {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::os::unix::net::UnixDatagram;
     use std::time::{Duration, Instant};
+
     #[test]
     #[ignore = "requires Linux >= 6.0 with io_uring enabled; no root required"]
     fn datagrams_batch_complete_and_cancel_without_traffic() {
         let (a, b) = UnixDatagram::pair().unwrap();
         a.set_nonblocking(true).unwrap();
         b.set_nonblocking(true).unwrap();
+
         let cfg = UringConfig {
             entries: 16,
             rx_depth: 4,
         };
+
         let mut dev = UringTunDevice::from_parts(
             a.into(),
             "test".into(),
@@ -326,6 +368,7 @@ mod tests {
             cfg,
         )
         .unwrap();
+
         let mut tx = Vec::with_capacity(8);
         for i in 0..8u8 {
             let mut buf = dev.alloc().unwrap();
@@ -334,22 +377,26 @@ mod tests {
             tx.push(buf);
         }
         assert_eq!(dev.send(&mut tx).unwrap(), 8);
+
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut received = Vec::new();
         while received.len() < 8 || dev.pending_tx() != 0 {
             assert!(Instant::now() < deadline);
             dev.progress().unwrap();
+
             let mut bytes = [0; 200];
             if let Ok(n) = b.recv(&mut bytes) {
                 assert_eq!(n, 100);
                 received.push(bytes[0]);
             }
         }
+
         received.sort_unstable();
         assert_eq!(received, (0..8u8).collect::<Vec<_>>());
         let mut rx = Vec::new();
         dev.recv(4, &mut rx).unwrap();
         b.send(b"response").unwrap();
+
         while rx.is_empty() {
             assert!(Instant::now() < deadline);
             dev.recv(4, &mut rx).unwrap();

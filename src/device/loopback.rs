@@ -87,6 +87,7 @@ impl Device for LoopbackDevice {
             if len > buf.tail_capacity() {
                 buf.set_headroom(0);
             }
+
             let base = slot * slot_size;
             let off = buf.data_offset();
             buf.as_mut_slice()[off..off + len].copy_from_slice(&self.arena[base..base + len]);
@@ -107,14 +108,17 @@ impl Device for LoopbackDevice {
                 if sent > 0 {
                     break;
                 }
+
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "invalid loopback frame length",
                 ));
             }
+
             let Some(slot) = self.free_slots.pop() else {
                 break;
             };
+
             let base = slot * slot_size;
             self.arena[base..base + src.len()].copy_from_slice(src);
             self.rx.push_back((slot, src.len()));

@@ -27,6 +27,7 @@ fn alloc_free_roundtrip_exhausts_and_reuses() {
     let b = pool.alloc().unwrap();
     let mut reuse = vec![a, b];
     reuse.sort_unstable();
+
     let mut expected = vec![got[1], got[3]];
     expected.sort_unstable();
     assert_eq!(reuse, expected);
@@ -108,6 +109,7 @@ fn from_raw_parts_wraps_external_memory() {
     pool.free(b);
     pool.free(c);
     drop(pool);
+
     // backing still alive and unmodified structurally
     assert_eq!(backing.len(), frame_size * num);
 }
@@ -190,7 +192,6 @@ fn headroom_exhaustion_panics() {
 
     let mut buf = pool.packet_buf(idx, 0);
     buf.set_headroom(8);
-
     buf.push_header(&[1, 2, 3, 4]); // 4 bytes, ok
     buf.push_header(&[5, 6, 7, 8]); // 4 bytes, exactly exhausts
     buf.push_header(&[9]); // 1 byte, PANIC here

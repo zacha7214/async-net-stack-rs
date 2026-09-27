@@ -95,6 +95,7 @@ impl FramePool {
     ) -> Self {
         assert!(num_frames > 0 && frame_size > 0);
         assert!(num_frames.checked_mul(frame_size).expect("arena overflow") <= total);
+
         Self::build(
             NonNull::new(ptr).expect("null arena"),
             frame_size,
@@ -129,11 +130,13 @@ impl FramePool {
     pub(crate) fn alloc_n(&self, out: &mut [usize]) -> usize {
         let count = self.available();
         let n = out.len().min(count);
+
         for (dst, src) in out[..n].iter_mut().zip(&self.0.free_list[count - n..count]) {
             *dst = src.get();
             #[cfg(debug_assertions)]
             self.mark_used(*dst, true);
         }
+
         self.0.free_count.set(count - n);
         n
     }
@@ -141,22 +144,26 @@ impl FramePool {
     #[cfg(any(test, all(feature = "xdp", target_os = "linux")))]
     pub(crate) fn free_n(&self, indices: &[usize]) {
         let count = self.available();
+
         #[cfg(debug_assertions)]
         for &idx in indices {
             self.mark_used(idx, false);
         }
+
         for (&idx, dst) in indices
             .iter()
             .zip(&self.0.free_list[count..count + indices.len()])
         {
             dst.set(idx);
         }
+
         self.0.free_count.set(count + indices.len());
     }
 
     /// Internal ownership transfer: idx must be allocated and have no handle.
     pub(crate) fn packet_buf(&self, idx: usize, len: usize) -> PacketBuf {
         assert!(idx < self.num_frames() && len <= self.frame_size());
+
         PacketBuf {
             ptr: unsafe {
                 NonNull::new_unchecked(self.0.ptr.as_ptr().add(idx * self.frame_size()))
@@ -174,6 +181,7 @@ impl FramePool {
     pub(crate) fn alloc_batch(&self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
         let mut indices = [0; 64];
         let mut total = 0;
+
         while total < max {
             let limit = indices.len().min(max - total);
             let n = self.alloc_n(&mut indices[..limit]);
@@ -183,15 +191,18 @@ impl FramePool {
                 break;
             }
         }
+
         total
     }
 
     pub(crate) fn available(&self) -> usize {
         self.0.free_count.get()
     }
+
     pub(crate) fn num_frames(&self) -> usize {
         self.0.num_frames
     }
+
     pub(crate) fn frame_size(&self) -> usize {
         self.0.frame_size
     }
@@ -245,14 +256,17 @@ impl PacketBuf {
     pub fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(self.data_offset), self.len) }
     }
+
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity) }
     }
+
     #[inline]
     pub fn as_mut_packet(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(self.data_offset), self.len) }
     }
+
     pub fn set_headroom(&mut self, headroom: usize) {
         assert!(
             headroom <= self.capacity - self.len,
@@ -260,6 +274,7 @@ impl PacketBuf {
         );
         self.data_offset = headroom;
     }
+
     #[inline]
     pub fn set_len(&mut self, len: usize) {
         assert!(
@@ -268,30 +283,37 @@ impl PacketBuf {
         );
         self.len = len;
     }
+
     pub fn push_header(&mut self, bytes: &[u8]) {
         assert!(bytes.len() <= self.data_offset, "headroom exhausted");
         self.data_offset -= bytes.len();
         self.len += bytes.len();
         self.as_mut_packet()[..bytes.len()].copy_from_slice(bytes);
     }
+
     pub fn pull_header(&mut self, n: usize) {
         assert!(n <= self.len);
         self.data_offset += n;
         self.len -= n;
     }
+
     pub fn data_offset(&self) -> usize {
         self.data_offset
     }
+
     pub fn len(&self) -> usize {
         self.len
     }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
     /// Entire frame size, including headroom. See `tail_capacity` for payload.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
+
     pub fn tail_capacity(&self) -> usize {
         self.capacity - self.data_offset
     }
@@ -305,6 +327,7 @@ impl PacketBuf {
             .as_ref()
             .is_some_and(|p| Rc::ptr_eq(&p.0, &pool.0))
     }
+
     #[cfg(all(feature = "xdp", target_os = "linux"))]
     pub(crate) fn frame_index(&self) -> usize {
         self.idx
@@ -317,6 +340,7 @@ impl PacketBuf {
         (self.idx, self.len)
     }
 }
+
 impl Drop for PacketBuf {
     #[inline]
     fn drop(&mut self) {
@@ -325,6 +349,7 @@ impl Drop for PacketBuf {
         }
     }
 }
+
 impl fmt::Debug for PacketBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PacketBuf")
