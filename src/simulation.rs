@@ -102,6 +102,7 @@ impl Network {
             active: true,
             online: true,
         });
+
         for &address in addresses {
             state.routes.insert(address, id);
         }

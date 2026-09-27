@@ -63,6 +63,7 @@ pub struct Telemetry {
     worker: Option<JoinHandle<()>>,
     capacity: usize,
 }
+
 impl Telemetry {
     pub fn start(config: TelemetryConfig) -> io::Result<Self> {
         if config.capacity == 0
@@ -80,9 +81,11 @@ impl Telemetry {
                 "invalid telemetry configuration",
             ));
         }
+
         let socket = UdpSocket::bind(config.bind)?;
         socket.connect(config.client)?;
         socket.set_nonblocking(true)?;
+
         let mut session = [0; 8];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut session)?;
         let shared = Arc::new(Shared {
@@ -93,6 +96,7 @@ impl Telemetry {
             send_errors: AtomicU64::new(0),
             source_overwrites: AtomicU64::new(0),
         });
+
         let worker_shared = shared.clone();
         let capacity = config.capacity;
         let worker = thread::Builder::new()
@@ -100,6 +104,7 @@ impl Telemetry {
             .spawn(move || {
                 export(worker_shared, socket, config, session);
             })?;
+
         Ok(Self {
             shared,
             worker: Some(worker),
@@ -126,6 +131,7 @@ impl Telemetry {
             }
         }
         self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+
         false
     }
 
@@ -139,6 +145,7 @@ impl Telemetry {
     /// Drains already collected records once; UDP delivery is never guaranteed.
     pub fn shutdown(mut self) -> thread::Result<()> {
         self.shared.stopped.store(true, Ordering::Relaxed);
+
         if let Some(worker) = self.worker.take() {
             worker.thread().unpark();
             worker.join()
@@ -147,13 +154,15 @@ impl Telemetry {
         }
     }
 }
+
 impl Drop for Telemetry {
     fn drop(&mut self) {
         self.shared.stopped.store(true, Ordering::Relaxed);
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
-        // Drop must not stall the application; use shutdown() to join explicitly.
+
+        // Drop must not stall the application. Use shutdown() for explicit join.
     }
 }
 
@@ -161,26 +170,32 @@ fn export(shared: Arc<Shared>, socket: UdpSocket, cfg: TelemetryConfig, session:
     let mut pending = Vec::with_capacity(cfg.capacity);
     let mut sequence = 0u64;
     let mut heartbeat = Instant::now();
+
     loop {
         let stopping = shared.stopped.load(Ordering::Relaxed);
         {
             let Ok(mut records) = shared.records.lock() else {
                 return;
             };
+
             std::mem::swap(&mut *records, &mut pending);
         } // Never hold the producer lock during encoding or socket work.
+
         if pending.is_empty() && (Instant::now() >= heartbeat || stopping) {
             send(&socket, &shared, session, &mut sequence, &[]);
             heartbeat = Instant::now() + cfg.heartbeat_interval;
         }
+
         for batch in pending.chunks(BATCH) {
             send(&socket, &shared, session, &mut sequence, batch);
             heartbeat = Instant::now() + cfg.heartbeat_interval;
         }
+
         pending.clear();
         if stopping {
             break;
         }
+
         thread::park_timeout(cfg.export_interval);
     }
 }
@@ -188,9 +203,11 @@ fn export(shared: Arc<Shared>, socket: UdpSocket, cfg: TelemetryConfig, session:
 fn put(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
 }
+
 fn micros(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
 }
+
 fn send(
     socket: &UdpSocket,
     shared: &Shared,
@@ -204,6 +221,7 @@ fn send(
     bytes[6..8].copy_from_slice(&(events.len() as u16).to_be_bytes());
     bytes[8..16].copy_from_slice(&session);
     put(&mut bytes, 16, *sequence);
+
     *sequence = sequence.wrapping_add(1);
     put(&mut bytes, 24, shared.progress.load(Ordering::Relaxed));
     put(&mut bytes, 32, shared.dropped.load(Ordering::Relaxed));
@@ -213,18 +231,21 @@ fn send(
         48,
         shared.source_overwrites.load(Ordering::Relaxed),
     );
+
     for (index, event) in events.iter().enumerate() {
         let record = &mut bytes[HEADER + index * RECORD..HEADER + (index + 1) * RECORD];
         let s = event.status;
         let f = s.flow;
         put(record, 0, micros(event.at));
         put(record, 8, event.connection.as_u64());
+
         record[16] = state(s.state);
         record[17] = wait(f.wait);
         record[20..24].copy_from_slice(&s.local.ip().octets());
         record[24..28].copy_from_slice(&s.remote.ip().octets());
         record[28..30].copy_from_slice(&s.local.port().to_be_bytes());
         record[30..32].copy_from_slice(&s.remote.port().to_be_bytes());
+
         for (i, value) in [
             s.send_buffered as u64,
             s.receive_buffered as u64,
@@ -243,11 +264,13 @@ fn send(
             put(record, 32 + i * 8, value);
         }
     }
+
     let len = HEADER + RECORD * events.len();
     if socket.send(&bytes[..len]).map_or(true, |n| n != len) {
         shared.send_errors.fetch_add(1, Ordering::Relaxed);
     }
 }
+
 fn state(value: TcpState) -> u8 {
     match value {
         TcpState::SynSent => 0,
@@ -265,6 +288,7 @@ fn state(value: TcpState) -> u8 {
         TcpState::Failed => 12,
     }
 }
+
 fn wait(value: TcpWait) -> u8 {
     match value {
         TcpWait::Application => 0,

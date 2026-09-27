@@ -18,6 +18,7 @@ impl Route {
                 "invalid IPv4 route",
             ));
         }
+
         Ok(Self {
             network: Ipv4Addr::from(u32::from(address) & mask(prefix_len)),
             prefix_len,
@@ -28,15 +29,19 @@ impl Route {
     pub fn network(self) -> Ipv4Addr {
         self.network
     }
+
     pub fn prefix_len(self) -> u8 {
         self.prefix_len
     }
+
     pub fn gateway(self) -> Option<Ipv4Addr> {
         self.gateway
     }
+
     pub fn contains(self, ip: Ipv4Addr) -> bool {
         u32::from(ip) & mask(self.prefix_len) == u32::from(self.network)
     }
+
     pub fn next_hop(self, destination: Ipv4Addr) -> Ipv4Addr {
         self.gateway.unwrap_or(destination)
     }
@@ -67,12 +72,14 @@ impl RouteTable {
             *existing = route;
             return Ok(());
         }
+
         if self.entries.len() == self.limit {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "route table full",
             ));
         }
+
         self.entries.push(route);
         Ok(())
     }
@@ -91,6 +98,7 @@ impl RouteTable {
         let before = self.entries.len();
         self.entries
             .retain(|r| r.network != key.network || r.prefix_len != key.prefix_len);
+
         Ok(self.entries.len() != before)
     }
 

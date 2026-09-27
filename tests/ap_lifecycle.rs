@@ -18,6 +18,7 @@ fn packet(source: &mut SimDevice, destination: [u8; 4]) -> PacketBuf {
         0,
     )
     .unwrap();
+
     frame
 }
 
@@ -49,6 +50,7 @@ fn restart_requires_association_and_preserves_unsent_ownership() {
         },
     )
     .unwrap();
+
     assert_eq!(a.send(&mut tx).unwrap(), 1);
     assert!(tx[0].is_empty());
     assert_eq!(b.queued(), 1);
@@ -84,6 +86,7 @@ fn broadcast_is_scoped_and_disconnect_purges_copies_in_both_directions() {
         ap.associate(&foreign).unwrap_err().kind(),
         io::ErrorKind::InvalidInput
     );
+
     ap.associate(&a).unwrap();
     ap.associate(&b).unwrap();
 

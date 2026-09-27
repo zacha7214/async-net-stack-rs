@@ -561,6 +561,7 @@ impl Connection {
         let count = (segment.payload.len() - skip).min(window);
         self.received
             .extend(segment.payload[skip..skip + count].iter().copied());
+
         self.receive_next = self.receive_next.wrapping_add(count as u32);
         let fin_sequence = segment.sequence.wrapping_add(segment.payload.len() as u32);
 
@@ -590,6 +591,7 @@ impl Connection {
             } else {
                 sample - srtt
             };
+
             self.rttvar = (self.rttvar.saturating_mul(3) / 4).saturating_add(difference / 4);
             self.srtt = Some((srtt.saturating_mul(7) / 8).saturating_add(sample / 8));
         } else {
@@ -810,6 +812,7 @@ impl Connection {
         if !send_flight && !self.ack_pending && !self.probe_pending {
             return Ok((false, false));
         }
+
         let Some(mut frame) = device.alloc() else {
             self.device_blocked = true;
             return Ok((false, false));

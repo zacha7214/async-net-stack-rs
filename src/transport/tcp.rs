@@ -76,17 +76,21 @@ pub fn parse_ipv4(bytes: &[u8]) -> io::Result<Segment<'_>> {
         if kind == 0 {
             break;
         }
+
         if kind == 1 {
             offset += 1;
             continue;
         }
+
         if offset + 2 > header_len {
             return Err(invalid());
         }
+
         let len = tcp[offset + 1] as usize;
         if len < 2 || offset + len > header_len {
             return Err(invalid());
         }
+
         if kind == 2 {
             if len != 4 || mss.is_some() {
                 return Err(invalid());
@@ -97,8 +101,10 @@ pub fn parse_ipv4(bytes: &[u8]) -> io::Result<Segment<'_>> {
             }
             mss = Some(value);
         }
+
         offset += len;
     }
+
     Ok(Segment {
         source: SocketAddrV4::new(source, read16(tcp, 0)),
         destination: SocketAddrV4::new(destination, read16(tcp, 2)),
@@ -119,9 +125,11 @@ pub fn build_ipv4(frame: &mut PacketBuf, segment: &Segment<'_>) -> io::Result<()
             "TCP segment exceeds capacity or has invalid MSS",
         )
     };
+
     if segment.mss == Some(0) || (segment.mss.is_some() && segment.flags & SYN == 0) {
         return Err(invalid());
     }
+
     let tcp_header = if segment.mss.is_some() { 24 } else { 20 };
     let total = segment
         .payload
@@ -130,6 +138,7 @@ pub fn build_ipv4(frame: &mut PacketBuf, segment: &Segment<'_>) -> io::Result<()
         .filter(|&n| n <= u16::MAX as usize && n <= frame.tail_capacity())
         .ok_or_else(invalid)?;
     frame.set_len(total);
+
     let bytes = frame.as_mut_packet();
     bytes[..20 + tcp_header].fill(0);
     bytes[0] = 0x45;
@@ -139,8 +148,10 @@ pub fn build_ipv4(frame: &mut PacketBuf, segment: &Segment<'_>) -> io::Result<()
     bytes[9] = 6;
     bytes[12..16].copy_from_slice(&segment.source.ip().octets());
     bytes[16..20].copy_from_slice(&segment.destination.ip().octets());
+
     let sum = checksum(&bytes[..20]);
     bytes[10..12].copy_from_slice(&sum.to_be_bytes());
+
     let tcp = &mut bytes[20..];
     tcp[0..2].copy_from_slice(&segment.source.port().to_be_bytes());
     tcp[2..4].copy_from_slice(&segment.destination.port().to_be_bytes());
@@ -149,13 +160,17 @@ pub fn build_ipv4(frame: &mut PacketBuf, segment: &Segment<'_>) -> io::Result<()
     tcp[12] = ((tcp_header / 4) as u8) << 4;
     tcp[13] = segment.flags;
     tcp[14..16].copy_from_slice(&segment.window.to_be_bytes());
+
     if let Some(mss) = segment.mss {
         tcp[20..22].copy_from_slice(&[2, 4]);
         tcp[22..24].copy_from_slice(&mss.to_be_bytes());
     }
+
     tcp[tcp_header..].copy_from_slice(segment.payload);
+
     let sum = ipv4_checksum(*segment.source.ip(), *segment.destination.ip(), tcp);
     tcp[16..18].copy_from_slice(&sum.to_be_bytes());
+
     Ok(())
 }
 

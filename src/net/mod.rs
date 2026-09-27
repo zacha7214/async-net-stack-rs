@@ -143,33 +143,42 @@ impl Responder {
                 if body.len() < 8 || checksum(body) != 0 {
                     return Reply::Malformed;
                 }
+
                 if body[0] != 8 || body[1] != 0 {
                     return Reply::Ignored;
                 }
+
                 body[0] = 0;
                 body[2..4].fill(0);
+
                 let sum = checksum(body);
                 body[2..4].copy_from_slice(&sum.to_be_bytes());
+
                 Reply::Icmp
             }
             17 => {
                 if body.len() < 8 || read16(body, 4) as usize != body.len() {
                     return Reply::Malformed;
                 }
+
                 if Some(read16(body, 2)) != self.udp_port {
                     return Reply::Ignored;
                 }
+
                 if read16(body, 6) != 0
                     && crate::transport::udp::ipv4_checksum(source, self.ipv4, body) != 0
                 {
                     return Reply::Malformed;
                 }
+
                 body.swap(0, 2);
                 body.swap(1, 3);
+
                 // Swapping source/destination IPs and ports preserves their
                 // one's-complement sum, including the IPv4 pseudo-header.
                 Reply::Udp
             }
+
             _ => return Reply::Ignored,
         };
 
@@ -177,14 +186,17 @@ impl Responder {
         ip[16..20].copy_from_slice(&source);
         ip[8] = 64;
         ip[10..12].fill(0);
+
         let sum = checksum(&ip[..ihl]);
         ip[10..12].copy_from_slice(&sum.to_be_bytes());
         if link == LinkLayer::Ethernet {
             packet.copy_within(6..12, 0);
             packet[6..12].copy_from_slice(&self.mac);
         }
+
         let len = offset + total;
         self.finish_frame(frame, len, link);
+
         reply
     }
 
@@ -218,6 +230,7 @@ impl Responder {
 
         Reply::Arp
     }
+
     fn finish_frame(&self, frame: &mut PacketBuf, len: usize, link: LinkLayer) {
         let padded = if link == LinkLayer::Ethernet {
             len.max(60).min(frame.tail_capacity())
@@ -228,6 +241,7 @@ impl Responder {
         frame.as_mut_packet()[len..].fill(0);
     }
 }
+
 fn read16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
 }
@@ -306,11 +320,9 @@ mod tests {
         };
 
         assert_eq!(responder.respond(&mut buf, LinkLayer::Ip), Reply::Icmp);
-
         assert_eq!(checksum(&buf.as_slice()[..20]), 0);
         assert_eq!(checksum(&buf.as_slice()[20..]), 0);
         assert_eq!(&buf.as_slice()[16..20], &[10, 0, 0, 1]);
-
         assert_eq!(buf.as_slice()[20], 0);
     }
 }

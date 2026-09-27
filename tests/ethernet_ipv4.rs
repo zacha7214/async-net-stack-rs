@@ -24,6 +24,7 @@ struct Wire {
     send_limit: usize,
     fail_send: bool,
 }
+
 impl Wire {
     fn new(frames: usize) -> Self {
         Self {
@@ -34,6 +35,7 @@ impl Wire {
             fail_send: false,
         }
     }
+
     fn inject_arp(&mut self, operation: arp::Operation, ip: Ipv4Addr, mac: [u8; 6]) {
         let mut bytes = vec![0; 60];
         bytes[..6].copy_from_slice(&LOCAL_MAC);
@@ -49,9 +51,11 @@ impl Wire {
             }
             .encode(),
         );
+
         self.incoming.push_back(bytes);
     }
 }
+
 impl Device for Wire {
     fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> io::Result<usize> {
         out.clear();
@@ -66,6 +70,7 @@ impl Device for Wire {
         }
         Ok(out.len())
     }
+
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         if self.fail_send {
             return Err(io::Error::new(io::ErrorKind::Other, "scripted failure"));
@@ -77,9 +82,11 @@ impl Device for Wire {
         }
         Ok(n)
     }
+
     fn alloc(&mut self) -> Option<PacketBuf> {
         self.pool.alloc()
     }
+
     fn frame_size(&self) -> usize {
         self.pool.frame_size()
     }
@@ -88,6 +95,7 @@ impl Device for Wire {
 fn interface() -> EthernetIpv4<Wire> {
     EthernetIpv4::new(Wire::new(32), InterfaceConfig::new(LOCAL, 24, LOCAL_MAC)).unwrap()
 }
+
 fn packet(interface: &mut EthernetIpv4<Wire>, destination: Ipv4Addr, value: u8) -> PacketBuf {
     let mut frame = interface.alloc().unwrap();
     udp::build_ipv4(
@@ -98,6 +106,7 @@ fn packet(interface: &mut EthernetIpv4<Wire>, destination: Ipv4Addr, value: u8) 
         0,
     )
     .unwrap();
+
     frame
 }
 
@@ -110,12 +119,14 @@ fn routes_normalize_and_choose_longest_prefix() {
     routes.insert(default).unwrap();
     routes.insert(connected).unwrap();
     routes.insert(host).unwrap();
+
     assert_eq!(connected.network(), Ipv4Addr::new(192, 168, 1, 0));
     assert_eq!(routes.lookup(PEER), Some(host));
     assert_eq!(
         routes.lookup(Ipv4Addr::new(192, 168, 1, 60)),
         Some(connected)
     );
+
     assert_eq!(routes.lookup(Ipv4Addr::new(203, 0, 113, 1)), Some(default));
     assert!(Route::new(LOCAL, 33, None).is_err());
     assert!(routes.insert(Route::new(LOCAL, 16, None).unwrap()).is_err());
@@ -130,17 +141,21 @@ fn arp_miss_queues_then_reply_releases_original_ip_packet() {
     assert_eq!(interface.send(&mut tx).unwrap(), 1);
     assert!(tx[0].is_empty());
     interface.advance(Duration::ZERO).unwrap();
+
     let request = &interface.device_mut().sent[0];
     assert_eq!(&request[..6], &[0xff; 6]);
+
     let request = arp::Packet::parse(&request[14..]).unwrap();
     assert_eq!(request.operation, arp::Operation::Request);
     assert_eq!(request.target_ip, PEER);
     interface
         .device_mut()
         .inject_arp(arp::Operation::Reply, PEER, PEER_MAC);
+
     let mut rx = Vec::new();
     assert_eq!(interface.recv(8, &mut rx).unwrap(), 0);
     assert_eq!(interface.pending(), 0);
+
     let data = &interface.device_mut().sent[1];
     assert_eq!(&data[..6], &PEER_MAC);
     assert_eq!(&data[14..14 + original.len()], &original);
@@ -153,16 +168,19 @@ fn gateway_mac_does_not_replace_remote_ip_and_static_entries_do_not_learn() {
     let mut interface = interface();
     interface.set_gateway(GATEWAY).unwrap();
     interface.add_static_neighbor(GATEWAY, PEER_MAC).unwrap();
+
     let remote = Ipv4Addr::new(203, 0, 113, 9);
     let frame = packet(&mut interface, remote, 3);
     interface.send(&mut [frame]).unwrap();
     interface.advance(Duration::ZERO).unwrap();
+
     let data = &interface.device_mut().sent[0];
     assert_eq!(&data[..6], &PEER_MAC);
     assert_eq!(&data[30..34], &remote.octets());
     interface
         .device_mut()
         .inject_arp(arp::Operation::Request, GATEWAY, [2, 9, 9, 9, 9, 9]);
+
     interface.recv(8, &mut Vec::new()).unwrap();
     assert!(interface
         .neighbors()
@@ -173,23 +191,27 @@ fn gateway_mac_does_not_replace_remote_ip_and_static_entries_do_not_learn() {
 fn partial_acceptance_and_backend_failures_keep_packet_ownership() {
     let mut config = InterfaceConfig::new(LOCAL, 24, LOCAL_MAC);
     config.tx_capacity = 1;
+
     let mut interface = EthernetIpv4::new(Wire::new(8), config).unwrap();
     interface.add_static_neighbor(PEER, PEER_MAC).unwrap();
     let mut tx = vec![
         packet(&mut interface, PEER, 1),
         packet(&mut interface, PEER, 2),
     ];
+
     let second = tx[1].as_slice().to_vec();
     assert_eq!(interface.send(&mut tx).unwrap(), 1);
     assert!(tx[0].is_empty());
     assert_eq!(tx[1].as_slice(), second);
     interface.device_mut().fail_send = true;
+
     assert!(interface.advance(Duration::ZERO).is_err());
     assert_eq!(interface.pending(), 1);
     assert_eq!(interface.send(&mut tx[1..]).unwrap(), 0);
     interface.device_mut().fail_send = false;
     interface.advance(Duration::ZERO).unwrap();
     assert_eq!(interface.send(&mut tx[1..]).unwrap(), 1);
+
     interface.advance(Duration::ZERO).unwrap();
     assert_eq!(interface.device_mut().sent.len(), 2);
     assert_eq!(interface.device_mut().sent[0][42], 1);
@@ -202,15 +224,18 @@ fn invalid_batch_consumes_nothing_and_no_route_is_reported() {
     let first = packet(&mut interface, PEER, 1);
     let mut bad = packet(&mut interface, PEER, 2);
     bad.as_mut_packet()[0] = 0;
+
     let mut tx = vec![first, bad];
     assert!(interface.send(&mut tx).is_err());
     assert!(tx.iter().all(|p| !p.is_empty()));
     assert_eq!(interface.pending(), 0);
+
     let mut remote = [packet(&mut interface, Ipv4Addr::new(203, 0, 113, 1), 3)];
     assert_eq!(
         interface.send(&mut remote).unwrap_err().kind(),
         io::ErrorKind::NotConnected
     );
+
     assert!(!remote[0].is_empty());
     assert_eq!(interface.stats().no_route, 1);
 }
@@ -223,10 +248,12 @@ fn unresolved_peer_does_not_block_resolved_peer_and_times_out() {
         packet(&mut interface, PEER, 1),
         packet(&mut interface, GATEWAY, 2),
     ];
+
     interface.send(&mut tx).unwrap();
     interface.advance(Duration::ZERO).unwrap();
     assert_eq!(interface.stats().submitted_ip, 1);
     assert_eq!(interface.pending(), 1);
+
     interface.advance(Duration::from_secs(3)).unwrap();
     assert_eq!(interface.pending(), 0);
     assert_eq!(interface.stats().timeout_drops, 1);
@@ -238,16 +265,19 @@ fn unresolved_peer_does_not_block_resolved_peer_and_times_out() {
 fn reserved_control_frame_allows_arp_when_application_exhausts_pool() {
     let mut interface =
         EthernetIpv4::new(Wire::new(2), InterfaceConfig::new(LOCAL, 24, LOCAL_MAC)).unwrap();
+
     let frame = packet(&mut interface, PEER, 1);
     assert!(interface.alloc().is_none());
     interface.send(&mut [frame]).unwrap();
     interface.advance(Duration::ZERO).unwrap();
     assert_eq!(interface.stats().submitted_control, 1);
+
     // Advancing before receiving must not reserve the final RX allocation.
     interface.advance(Duration::from_millis(1)).unwrap();
     interface
         .device_mut()
         .inject_arp(arp::Operation::Reply, PEER, PEER_MAC);
+
     interface.recv(1, &mut Vec::new()).unwrap();
     assert_eq!(interface.stats().submitted_ip, 1);
 }
@@ -264,17 +294,20 @@ fn receive_strips_ethernet_padding() {
         0,
     )
     .unwrap();
+
     let mut bytes = vec![0; 60];
     bytes[..6].copy_from_slice(&LOCAL_MAC);
     bytes[6..12].copy_from_slice(&PEER_MAC);
     bytes[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
     bytes[14..14 + frame.len()].copy_from_slice(frame.as_slice());
     drop(frame);
+
     interface.device_mut().incoming.push_back(bytes);
     let mut rx = Vec::new();
     assert_eq!(interface.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(rx[0].len(), 29);
     assert_eq!(udp::parse_ipv4(rx[0].as_slice()).unwrap().payload, b"a");
+
     interface.reset_link();
     assert_eq!(interface.pending(), 0);
 }

@@ -18,6 +18,7 @@ use crate::{
     device::{Device, PacketBuf},
     transport::tcp::{self, Segment, ACK, FIN, RST, SYN, URG},
 };
+
 use connection::Connection;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -51,6 +52,7 @@ pub enum TcpState {
     TimedOut,
     Failed,
 }
+
 impl TcpState {
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -65,35 +67,48 @@ pub struct TcpConfig {
     pub max_connections: usize,
     pub max_listeners: usize,
     pub control_capacity: usize,
+
     /// Per-connection bytes, including unacknowledged payload on the send side.
     pub send_capacity: usize,
+
     /// Receive storage, 1..=65535 bytes (window scaling is not negotiated).
     pub receive_capacity: usize,
+
     /// Maximum advertised free space; capped by actual remaining receive storage.
     pub receive_window_limit: u16,
+
     /// Initial congestion window in negotiated MSS units, 1..=4. The RFC 5681
     /// initial-window bound for large MSS values is applied automatically.
     pub initial_cwnd_segments: u16,
+
     /// Local byte ceiling (1..=2^30), never advertised on the wire. Actual output
     /// is also limited by send storage, flight slots and the peer receive window;
     /// without window scaling a peer can permit at most 65535 bytes in flight.
     pub max_cwnd_bytes: usize,
+
     /// Initial slow-start threshold (1..=2^30 bytes); loss updates it dynamically.
     pub initial_ssthresh_bytes: usize,
+
     /// Bounds retransmission descriptors, even with very small peer MSS values.
     pub max_inflight_segments: usize,
+
     /// Maximum segment submissions per connection in one poll.
     pub tx_burst: usize,
+
     /// Collect fixed-size state events, without formatting, I/O or extra clocks.
     pub verbose_state: bool,
+
     /// Global bounded event ring; oldest events are overwritten when full.
     pub event_capacity: usize,
+
     /// Minimum interval between changing flow-metric snapshots. State/wait
     /// transitions and retransmissions bypass this limit. No periodic event is
     /// emitted for an unchanged connection, including an unchanged ACK wait.
     pub state_report_interval: Duration,
+
     /// IPv4 datagram size; must also fit the underlying adapter and frame pool.
     pub mtu: usize,
+
     /// Local receive MSS and maximum send segment size before peer negotiation.
     pub mss: u16,
     pub initial_rto: Duration,
@@ -102,9 +117,11 @@ pub struct TcpConfig {
     pub handshake_timeout: Duration,
     pub send_timeout: Duration,
     pub close_timeout: Duration,
+
     /// Default 2 MSL. A tuple cannot be reused while it remains in TIME-WAIT.
     pub time_wait: Duration,
 }
+
 impl Default for TcpConfig {
     fn default() -> Self {
         Self {
@@ -257,6 +274,7 @@ impl<D: Device> TcpPool<D> {
         {
             return Err(invalid("invalid TCP configuration"));
         }
+
         Ok(Self {
             device,
             config,
@@ -278,9 +296,11 @@ impl<D: Device> TcpPool<D> {
     pub fn device_mut(&mut self) -> &mut D {
         &mut self.device
     }
+
     pub fn stats(&self) -> TcpStats {
         self.stats
     }
+
     pub fn config(&self) -> TcpConfig {
         self.config
     }
@@ -288,16 +308,20 @@ impl<D: Device> TcpPool<D> {
     /// Exact IPv4 bind, with no wildcard address or automatic ephemeral port selection.
     pub fn listen(&mut self, local: SocketAddrV4) -> io::Result<()> {
         validate_address(local)?;
+
         if self.listeners.contains(&local) {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
                 "TCP listener exists",
             ));
         }
+
         if self.listeners.len() == self.config.max_listeners {
             return Err(blocked("listener table full"));
         }
+
         self.listeners.insert(local);
+
         Ok(())
     }
 
@@ -317,24 +341,29 @@ impl<D: Device> TcpPool<D> {
     ) -> io::Result<ConnectionId> {
         validate_address(local)?;
         validate_address(remote)?;
+
         if local == remote {
             return Err(invalid("identical TCP endpoints"));
         }
+
         if self.connections.len() == self.config.max_connections {
             return Err(blocked("connection table full"));
         }
+
         if self.find(local, remote).is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
                 "TCP tuple already active",
             ));
         }
+
         let sequence = initial_sequence()?;
         let id = self.allocate_id()?;
         self.connections.insert(
             id,
             Connection::active(local, remote, sequence, self.now, &self.config),
         );
+
         Ok(id)
     }
 
@@ -342,6 +371,7 @@ impl<D: Device> TcpPool<D> {
         if !self.listeners.contains(&local) {
             return Err(invalid("no listener at this address"));
         }
+
         for (&id, connection) in &mut self.connections {
             if connection.local == local
                 && !connection.accepted
@@ -354,6 +384,7 @@ impl<D: Device> TcpPool<D> {
                 return Ok(Some(id));
             }
         }
+
         Ok(None)
     }
 
@@ -371,6 +402,7 @@ impl<D: Device> TcpPool<D> {
         if !self.config.verbose_state {
             return;
         }
+
         for (&id, c) in &mut self.connections {
             let status = c.status(&self.config);
             let key = (
@@ -378,14 +410,17 @@ impl<D: Device> TcpPool<D> {
                 status.flow.wait,
                 status.flow.timeout_retransmissions,
             );
+
             let transition = c.reported != Some(key);
             let metrics_changed = c.reported_flow != Some(status.flow);
             let sample_due = self.now
                 >= c.reported_at
                     .saturating_add(self.config.state_report_interval);
+
             if !transition && !(metrics_changed && sample_due) {
                 continue;
             }
+
             c.reported = Some(key);
             c.reported_flow = Some(status.flow);
             c.reported_at = self.now;
@@ -393,6 +428,7 @@ impl<D: Device> TcpPool<D> {
                 self.events.pop_front();
                 self.stats.events_overwritten = self.stats.events_overwritten.saturating_add(1);
             }
+
             self.events.push_back(TcpEvent {
                 at: self.now,
                 connection: id,
@@ -432,8 +468,10 @@ impl<D: Device> TcpPool<D> {
         let c = self.connections.get_mut(&id).ok_or_else(missing)?;
         let reset = c.reset_packet();
         c.fail(TcpState::Reset);
+
         self.queue_reset(reset);
         self.report_states();
+
         Ok(())
     }
 
@@ -448,8 +486,10 @@ impl<D: Device> TcpPool<D> {
         {
             return Err(blocked("connection is not terminal"));
         }
+
         self.report_states();
         self.connections.remove(&id);
+
         Ok(())
     }
 
@@ -490,6 +530,7 @@ impl<D: Device> TcpPool<D> {
             }
             Ok::<(), io::Error>(())
         })();
+
         rx.clear();
         self.rx = rx;
         result?;
@@ -512,6 +553,7 @@ impl<D: Device> TcpPool<D> {
                         }
                         result => result?,
                     };
+
                 self.stats.submitted += u64::from(sent);
                 self.stats.retransmitted += u64::from(retransmitted);
                 if !sent {
@@ -519,8 +561,10 @@ impl<D: Device> TcpPool<D> {
                 }
             }
         }
+
         self.report_states();
         self.device.poll_at(now)?;
+
         Ok(count)
     }
 
@@ -538,8 +582,10 @@ impl<D: Device> TcpPool<D> {
             .next_id
             .checked_add(1)
             .ok_or_else(|| invalid("connection IDs exhausted"))?;
+
         let id = ConnectionId(self.next_id);
         self.next_id = next;
+
         Ok(id)
     }
 
@@ -558,6 +604,7 @@ impl<D: Device> TcpPool<D> {
             self.stats.ignored += 1;
             return Ok(());
         }
+
         if let Some(id) = self.find(segment.destination, segment.source) {
             self.connections
                 .get_mut(&id)
@@ -565,6 +612,7 @@ impl<D: Device> TcpPool<D> {
                 .input(segment, self.now, &self.config);
             return Ok(());
         }
+
         // An L3 device may deliver broadcasts or packets for other local users.
         // Only emit resets for IP addresses explicitly used by this pool.
         if !self
@@ -579,15 +627,18 @@ impl<D: Device> TcpPool<D> {
             self.stats.ignored += 1;
             return Ok(());
         }
+
         if segment.flags & RST != 0 {
             return Ok(());
         }
+
         if self.listeners.contains(&segment.destination) && segment.flags & (SYN | ACK | FIN) == SYN
         {
             if self.connections.len() == self.config.max_connections {
                 self.stats.connection_overflow += 1;
                 return Ok(());
             }
+
             let sequence = initial_sequence()?;
             let id = self.allocate_id()?;
             self.connections.insert(
@@ -613,6 +664,7 @@ impl<D: Device> TcpPool<D> {
                 }
             });
         }
+
         Ok(())
     }
 
@@ -628,9 +680,11 @@ impl<D: Device> TcpPool<D> {
         let Some(reset) = self.resets.front().copied() else {
             return Ok(());
         };
+
         let Some(mut frame) = self.device.alloc() else {
             return Ok(());
         };
+
         tcp::build_ipv4(
             &mut frame,
             &Segment {
@@ -644,6 +698,7 @@ impl<D: Device> TcpPool<D> {
                 payload: &[],
             },
         )?;
+
         let n = match self.device.send(std::slice::from_mut(&mut frame)) {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
             Err(e)
@@ -660,12 +715,15 @@ impl<D: Device> TcpPool<D> {
                 self.stats.control_drops += 1;
                 return Ok(());
             }
+
             result => result?,
         };
+
         if n == 1 {
             self.resets.pop_front();
             self.stats.resets_submitted += 1;
         }
+
         Ok(())
     }
 }
@@ -673,8 +731,10 @@ impl<D: Device> TcpPool<D> {
 fn initial_sequence() -> io::Result<u32> {
     let mut bytes = [0; 4];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+
     Ok(u32::from_ne_bytes(bytes))
 }
+
 fn validate_address(address: SocketAddrV4) -> io::Result<()> {
     if address.port() == 0
         || address.ip().is_unspecified()
@@ -686,12 +746,15 @@ fn validate_address(address: SocketAddrV4) -> io::Result<()> {
         Ok(())
     }
 }
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
+
 fn blocked(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, message)
 }
+
 fn missing() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "unknown TCP connection")
 }

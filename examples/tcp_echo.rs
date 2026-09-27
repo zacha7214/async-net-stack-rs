@@ -86,11 +86,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.backend.as_str() {
         #[cfg(all(feature = "tun", any(target_os = "linux", target_os = "macos")))]
         "tun" => {
-            let device = async_net_stack_rs::device::DefaultDevice::new(&args.iface)?;
+            let device =
+                async_net_stack_rs::device::DefaultDevice::new(args.iface.parse::<u32>()?)?;
             eprintln!(
                 "TUN interface: {}; configure its address/link before connecting",
                 device.name()?
             );
+
             run(device, &args)?;
         }
         #[cfg(all(feature = "xdp", target_os = "linux"))]
@@ -99,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 device::{XdpConfig, XdpDevice, XdpMode},
                 net::{EthernetIpv4, InterfaceConfig},
             };
+
             let mac = parse_mac(args.mac.as_deref().ok_or("--mac is required with xdp")?)?;
             let device = XdpDevice::with_config(
                 &args.iface,
@@ -109,12 +112,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..XdpConfig::default()
                 },
             )?;
+
             let mut config = InterfaceConfig::new(args.ip, args.prefix, mac);
             config.event_capacity = 128;
             let mut interface = EthernetIpv4::new(device, config)?;
             if let Some(gateway) = args.gateway {
                 interface.set_gateway(gateway)?;
             }
+
             run(interface, &args)?;
         }
         _ => {
@@ -123,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
     }
+
     Ok(())
 }
 
@@ -282,6 +288,7 @@ fn parse_mac(value: &str) -> Result<[u8; 6], Box<dyn std::error::Error>> {
         .split(':')
         .map(|part| u8::from_str_radix(part, 16))
         .collect::<Result<Vec<_>, _>>()?;
+
     bytes
         .try_into()
         .map_err(|_| "MAC needs six hexadecimal octets".into())

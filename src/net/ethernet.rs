@@ -26,6 +26,7 @@ impl Header {
         bytes[..6].copy_from_slice(&self.destination);
         bytes[6..12].copy_from_slice(&self.source);
         bytes[12..].copy_from_slice(&self.ether_type.to_be_bytes());
+
         bytes
     }
 
@@ -38,6 +39,7 @@ impl Header {
                 "insufficient Ethernet headroom or padding capacity",
             ));
         }
+
         prepend(frame, self.source, self.destination, self.ether_type);
         Ok(())
     }
@@ -48,6 +50,7 @@ impl Header {
         let header = Self::parse(frame.as_slice()).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "truncated Ethernet header")
         })?;
+
         frame.pull_header(Self::LEN);
         Ok(header)
     }
@@ -66,6 +69,7 @@ pub(super) fn parse(bytes: &[u8]) -> Option<([u8; 6], [u8; 6], u16)> {
     if bytes.len() < HEADER {
         return None;
     }
+
     Some((
         bytes[..6].try_into().ok()?,
         bytes[6..12].try_into().ok()?,
@@ -82,6 +86,7 @@ pub(super) fn prepend(frame: &mut PacketBuf, source: [u8; 6], destination: [u8; 
     }
     .encode();
     frame.push_header(&header);
+
     let len = frame.len();
     if len < 60 {
         frame.set_len(60);

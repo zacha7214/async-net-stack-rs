@@ -92,11 +92,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ap.associate(firmware.device_mut())?;
     ap.set_link(firmware.device_mut(), client.device_mut(), Link::default())?;
     discover(&ap, &mut client, &mut firmware, client_addr)?;
+
     client.send_to(client_addr, firmware_addr, b"after restart")?;
     client.flush()?;
     firmware.poll(ap.now(), LEASE, 8, |_| Action::Echo)?;
     firmware.flush()?;
-
     client.poll(ap.now(), LEASE, 8, |d| {
         println!("echo: {}", String::from_utf8_lossy(d.payload));
         Action::Ignore

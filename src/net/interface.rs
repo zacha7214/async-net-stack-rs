@@ -398,6 +398,7 @@ impl<D: Device> EthernetIpv4<D> {
         if self.config.event_capacity == 0 {
             return;
         }
+
         if self.events.len() == self.config.event_capacity {
             self.events.pop_front();
         }
@@ -419,6 +420,7 @@ impl<D: Device> EthernetIpv4<D> {
         self.control.clear();
         self.neighbors
             .retain(|_, n| !matches!(n, NeighborState::Resolving { .. }));
+
         self.stats.configuration_drops += dropped as u64;
         self.event(InterfaceEvent::ConfigurationChanged { dropped });
     }
@@ -437,14 +439,17 @@ impl<D: Device> EthernetIpv4<D> {
         if self.control.len() == self.config.control_capacity {
             return false;
         }
+
         self.ensure_spare();
         let Some(mut frame) = self.control_spare.take() else {
             return false;
         };
+
         frame.set_len(arp::LEN);
         frame.as_mut_packet().copy_from_slice(&packet.encode());
         eth::prepend(&mut frame, self.config.mac, destination, eth::ARP);
         self.control.push_back(frame);
+
         true
     }
 
@@ -467,18 +472,22 @@ impl<D: Device> EthernetIpv4<D> {
     fn flush(&mut self) -> io::Result<()> {
         let control = flush_front(&mut self.device, &mut self.control)?;
         self.stats.submitted_control += control as u64;
+
         // Do not report a data failure as an all-or-nothing control failure.
         if control > 0 {
             self.event(InterfaceEvent::Submitted { data: 0, control });
         }
+
         if !self.control.is_empty() {
             return Ok(());
         }
+
         let data = flush_front(&mut self.device, &mut self.ready)?;
         self.stats.submitted_ip += data as u64;
         if data > 0 {
             self.event(InterfaceEvent::Submitted { data, control: 0 });
         }
+
         Ok(())
     }
 
@@ -494,11 +503,13 @@ impl<D: Device> EthernetIpv4<D> {
         if matches!(self.neighbors.get(&ip), Some(NeighborState::Static { .. })) {
             return;
         }
+
         if !self.neighbors.contains_key(&ip)
             && self.neighbors.len() == self.config.neighbor_capacity
         {
             return;
         }
+
         self.cancel_probes(ip);
         self.neighbors.insert(
             ip,
@@ -507,6 +518,7 @@ impl<D: Device> EthernetIpv4<D> {
                 expires: self.now.saturating_add(self.config.neighbor_ttl),
             },
         );
+
         self.event(InterfaceEvent::NeighborResolved { ip, mac });
     }
 
@@ -515,10 +527,12 @@ impl<D: Device> EthernetIpv4<D> {
             self.stats.malformed += 1;
             return;
         };
+
         if packet.sender_mac != source_mac {
             self.stats.malformed += 1;
             return;
         }
+
         if packet.sender_ip == self.config.address && packet.sender_mac != self.config.mac {
             self.stats.address_conflicts += 1;
             self.event(InterfaceEvent::AddressConflict {
@@ -526,10 +540,12 @@ impl<D: Device> EthernetIpv4<D> {
             });
             return;
         }
+
         if packet.target_ip != self.config.address {
             self.stats.ignored += 1;
             return;
         }
+
         match packet.operation {
             arp::Operation::Request => {
                 // A zero sender IP is an address-conflict probe: answer but do not learn it.
@@ -539,6 +555,7 @@ impl<D: Device> EthernetIpv4<D> {
                     self.stats.ignored += 1;
                     return;
                 }
+
                 let reply = arp::Packet {
                     operation: arp::Operation::Reply,
                     sender_mac: self.config.mac,
@@ -546,6 +563,7 @@ impl<D: Device> EthernetIpv4<D> {
                     target_mac: packet.sender_mac,
                     target_ip: packet.sender_ip,
                 };
+
                 if self.queue_arp(reply, packet.sender_mac) {
                     self.stats.arp_replies_queued += 1;
                 } else {
@@ -615,16 +633,19 @@ impl<D: Device> Device for EthernetIpv4<D> {
             self.advance(self.now)?;
             return Ok(0);
         }
+
         // Let a copying device use the reserved frame for RX too. Otherwise
         // replenishing the ARP reserve before recv could hold the final free
         // frame while a reply that would release queued data waits for a buffer.
         drop(self.control_spare.take());
+
         // Receive before flushing: an ARP reply must still be processed when TX is full.
         self.device.recv(max, &mut self.rx)?;
         let mut rx = std::mem::take(&mut self.rx);
         for frame in rx.drain(..) {
             self.receive_frame(frame, out);
         }
+
         self.rx = rx;
         self.advance(self.now)?;
         Ok(out.len())
@@ -633,6 +654,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         let available = self.config.tx_capacity - self.pending.len() - self.ready.len();
         let limit = available.min(frames.len());
+
         // Validate the prospective accepted prefix before changing any caller-owned frame.
         for frame in &frames[..limit] {
             let (source, destination, total) =
@@ -649,16 +671,19 @@ impl<D: Device> Device for EthernetIpv4<D> {
                     "unsupported source, destination, MTU or Ethernet headroom",
                 ));
             }
+
             if !self.broadcast(destination) {
                 let Some(route) = self.routes.lookup(destination) else {
                     self.stats.no_route += 1;
                     self.event(InterfaceEvent::NoRoute { destination });
                     return Err(io::Error::new(io::ErrorKind::NotConnected, "no IPv4 route"));
                 };
+
                 let hop = route.next_hop(destination);
                 if hop == self.config.address || self.broadcast(hop) || !route::unicast(hop) {
                     return Err(invalid("route has an invalid next hop"));
                 }
+
                 if matches!(self.neighbors.get(&hop), Some(NeighborState::Failed { retry_after }) if self.now < *retry_after)
                 {
                     return Err(io::Error::new(
@@ -668,6 +693,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
                 }
             }
         }
+
         let mut accepted = 0;
         for slot in &mut frames[..limit] {
             // The complete prospective prefix was validated above.
@@ -693,6 +719,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
                     {
                         break;
                     }
+
                     if !matches!(
                         self.neighbors.get(&next_hop),
                         Some(NeighborState::Resolving { .. })
@@ -707,11 +734,13 @@ impl<D: Device> Device for EthernetIpv4<D> {
                         );
                     }
                 }
+
                 self.event(InterfaceEvent::RouteSelected {
                     destination,
                     next_hop,
                     route,
                 });
+
                 let mut frame = std::mem::take(slot);
                 if let Some(mac) = mac {
                     eth::prepend(&mut frame, self.config.mac, mac, eth::IPV4);
@@ -721,13 +750,17 @@ impl<D: Device> Device for EthernetIpv4<D> {
                     self.event(InterfaceEvent::QueuedForNeighbor { next_hop });
                 }
             }
+
             accepted += 1;
         }
+
         if accepted < frames.len() {
             self.stats.queue_full += 1;
             self.event(InterfaceEvent::QueueFull);
         }
+
         self.stats.accepted_ip += accepted as u64;
+
         // No fallible backend work after ownership transfer. advance/recv submits later.
         Ok(accepted)
     }
@@ -735,6 +768,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
     fn alloc(&mut self) -> Option<PacketBuf> {
         self.ensure_spare();
         self.control_spare.as_ref()?;
+
         let mut frame = self.device.alloc()?;
         prepare_empty(&mut frame).ok()?;
         Some(frame)
@@ -747,12 +781,14 @@ impl<D: Device> Device for EthernetIpv4<D> {
 
 fn prepare_empty(frame: &mut PacketBuf) -> io::Result<()> {
     frame.set_len(0);
+
     let headroom = frame.data_offset().max(eth::HEADER);
     if headroom > frame.capacity() || frame.capacity() - headroom < 46 {
         return Err(invalid(
             "frame cannot hold Ethernet headers and minimum padding",
         ));
     }
+
     frame.set_headroom(headroom);
     Ok(())
 }
@@ -761,11 +797,13 @@ fn flush_front<D: Device>(device: &mut D, queue: &mut VecDeque<PacketBuf>) -> io
     if queue.is_empty() {
         return Ok(0);
     }
+
     let (front, _) = queue.as_mut_slices();
     let accepted = match device.send(front) {
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
         result => result?,
     };
+
     queue.drain(..accepted);
     Ok(accepted)
 }
@@ -775,6 +813,7 @@ fn ipv4(bytes: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, usize)> {
     if bytes.len() < 20 || bytes[0] != 0x45 || bytes[8] == 0 {
         return None;
     }
+
     let total = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
     if total < 20
         || total > bytes.len()
@@ -783,6 +822,7 @@ fn ipv4(bytes: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, usize)> {
     {
         return None;
     }
+
     Some((
         Ipv4Addr::from(<[u8; 4]>::try_from(&bytes[12..16]).ok()?),
         Ipv4Addr::from(<[u8; 4]>::try_from(&bytes[16..20]).ok()?),
@@ -793,6 +833,7 @@ fn ipv4(bytes: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, usize)> {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
+
 fn blocked(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, message)
 }
