@@ -8,6 +8,7 @@ use std::{io, net::Ipv4Addr, time::Duration};
 fn port(ap: &AccessPoint, n: u8) -> SimDevice {
     ap.port(&[Ipv4Addr::new(10, 0, 0, n)], 8, 4).unwrap()
 }
+
 fn packet(source: &mut SimDevice, destination: [u8; 4]) -> PacketBuf {
     let mut frame = source.alloc().unwrap();
     build_ipv4(
@@ -32,10 +33,12 @@ fn restart_requires_association_and_preserves_unsent_ownership() {
         ap.associate(&a).unwrap_err().kind(),
         io::ErrorKind::NotConnected
     );
+
     assert_eq!(
         a.send(&mut tx).unwrap_err().kind(),
         io::ErrorKind::NotConnected
     );
+
     assert!(!tx[0].is_empty());
 
     ap.start();
@@ -71,6 +74,7 @@ fn restart_requires_association_and_preserves_unsent_ownership() {
     a.send(&mut tx).unwrap();
     ap.advance(Duration::from_secs(1)).unwrap();
     assert_eq!(b.recv(8, &mut Vec::new()).unwrap(), 1);
+    
 }
 
 #[test]

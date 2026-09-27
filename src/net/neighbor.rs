@@ -22,6 +22,7 @@ pub enum NeighborState {
 }
 
 impl NeighborState {
+    
     pub(crate) fn mac(self, now: Duration) -> Option<[u8; 6]> {
         match self {
             Self::Static { mac } => Some(mac),
