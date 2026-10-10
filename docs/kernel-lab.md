@@ -119,7 +119,7 @@ whole debugging path available. The checks that matter most:
 * The builder must be **ARM64 Linux** — the kernel is built natively, not cross-compiled.
 * `busybox` must be **statically linked** (`busybox-static`). The initramfs
   also carries the receiver and Wi-Fi tools with their shared libraries.
-* Wi-Fi userspace packaging needs `iproute2`, `iw`, `hostapd`, `wpasupplicant`
+* Wi-Fi userspace packaging needs `iproute2`, `iw`, `hostapd`, `wpasupplicant`, `wmediumd`
   and Python on the builder; `wireless-regdb` supplies the regulatory database.
   The [Wi-Fi lab guide](wifi-lab.md) covers setup and the one-command
   `qemu-lab.py --rebuild --test wifi` flow. The builder kernel need not support Wi-Fi.

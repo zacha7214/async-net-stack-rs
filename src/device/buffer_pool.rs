@@ -31,6 +31,7 @@ impl FramePool {
             .checked_mul(frame_size)
             .expect("arena size overflow");
         let layout = Layout::from_size_align(total, alignment).expect("invalid layout");
+
         // Safe slice access may expose any byte, including unused capacity.
         // Zero once on construction; no per-packet clearing is necessary.
         let ptr = unsafe { alloc::alloc_zeroed(layout) };

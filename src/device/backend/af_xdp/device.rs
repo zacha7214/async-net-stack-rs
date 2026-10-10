@@ -141,6 +141,7 @@ impl XdpDevice {
             cfg.cq_entries,
             0,
         )?;
+
         // Virtio and other drivers may initialize their XDP receive resources
         // during attach. Bind only after that, with the redirect guard disabled.
         let mut prog = XskProgram::new(ifindex, cfg.max_queues)?;
@@ -149,18 +150,21 @@ impl XdpDevice {
         } else {
             AttachMode::None
         };
+
         if attach_mode == AttachMode::AlreadyAttached {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "an XDP program is already attached; its XSKMAP is not this device's map",
             ));
         }
+
         if attach_mode == AttachMode::Generic && cfg.mode == XdpMode::ZeroCopy {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "generic XDP cannot provide zero-copy",
             ));
         }
+
         let flags = XDP_USE_NEED_WAKEUP
             | match cfg.mode {
                 XdpMode::ZeroCopy => XDP_ZEROCOPY,
@@ -168,6 +172,7 @@ impl XdpDevice {
                 XdpMode::Auto if attach_mode == AttachMode::Generic => XDP_COPY,
                 XdpMode::Auto => 0,
             };
+
         let xsk = XskSocket::new(
             &umem,
             ifindex,
@@ -176,6 +181,7 @@ impl XdpDevice {
             cfg.tx_entries,
             flags,
         )?;
+
         let pool = unsafe {
             FramePool::from_owned_region(
                 umem.base_ptr(),
@@ -185,6 +191,7 @@ impl XdpDevice {
                 umem.arena_owner(),
             )
         };
+
         let batch = cfg.batch_size;
         let mut dev = Self {
             prog,
@@ -204,10 +211,13 @@ impl XdpDevice {
             attach_mode,
             counters: XdpCounters::default(),
         };
+
         dev.refill();
         dev.prog.set_socket(queue_id, dev.xsk.fd())?;
+
         Ok(dev)
     }
+
     pub fn bind_flags(&self) -> libc::c_ushort {
         self.xsk.bind_flags()
     }
@@ -247,6 +257,7 @@ impl XdpDevice {
         }
         n
     }
+
     fn drain_cq(&mut self) -> usize {
         self.cq_scratch.clear();
         let n = self.umem.cq_pop(&mut self.cq_scratch, self.cfg.batch_size);
@@ -266,6 +277,7 @@ impl XdpDevice {
         self.counters.tx_completed += valid as u64;
         n
     }
+
     fn refill(&mut self) {
         // Only the unpublished free list can provide RX frames. The shared FQ
         // consumer does not tell us which buffers the hardware still owns.
@@ -294,6 +306,7 @@ impl XdpDevice {
             self.xsk.wake_rx();
         }
     }
+
     #[cfg(test)]
     pub(crate) fn debug_umem(&self) -> &UMem {
         &self.umem
@@ -326,20 +339,24 @@ impl Device for XdpDevice {
                 self.counters.invalid_descriptors += 1;
                 continue; // quarantine malformed descriptors, never alias frames
             };
+
             if self.state[idx] != RX_KERNEL {
                 self.counters.invalid_descriptors += 1;
                 continue;
             }
+
             self.rx_owned -= 1;
             self.state[idx] = APP;
             let mut buf = self.pool.packet_buf(idx, 0);
             buf.set_headroom(offset);
             buf.set_len(len as usize);
+
             out.push(buf);
         }
         self.counters.rx_packets += out.len() as u64;
         Ok(out.len())
     }
+
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         self.drain_cq();
         let requested = frames.len().min(self.cfg.batch_size);
@@ -347,6 +364,7 @@ impl Device for XdpDevice {
         if n < requested {
             self.counters.tx_backpressure += 1;
         }
+
         // Validate before consuming anything; addresses from another UMEM must
         // never be interpreted as this socket's frame indices.
         for buf in &frames[..n] {
@@ -357,6 +375,7 @@ impl Device for XdpDevice {
                 ));
             }
         }
+
         self.tx_scratch.clear();
         for buf in &mut frames[..n] {
             let idx = buf.frame_index();
@@ -364,9 +383,11 @@ impl Device for XdpDevice {
                 (idx * self.cfg.chunk_size + buf.data_offset()) as u64,
                 buf.len() as u32,
             ));
+
             self.state[idx] = TX_KERNEL;
             std::mem::take(buf).into_parts();
         }
+
         let pushed = self.xsk.tx_push(&self.tx_scratch);
         assert_eq!(pushed, n, "single producer owns reserved TX slots");
         self.tx_pending += n;
@@ -374,18 +395,23 @@ impl Device for XdpDevice {
         if self.tx_pending > 0 {
             self.xsk.wake_tx();
         }
+
         Ok(n)
     }
+
     fn alloc(&mut self) -> Option<PacketBuf> {
         if self.pool.available() == 0 {
             self.progress();
         }
+
         let idx = self.pool.alloc()?;
         self.state[idx] = APP;
         let mut buf = self.pool.packet_buf(idx, 0);
         buf.set_headroom(self.cfg.headroom);
+
         Some(buf)
     }
+
     fn alloc_batch(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
         self.drain_cq();
         let n = self
@@ -399,6 +425,7 @@ impl Device for XdpDevice {
         }
         n
     }
+
     fn frame_size(&self) -> usize {
         self.cfg.chunk_size
     }
@@ -410,15 +437,19 @@ fn decode_rx(addr: u64, len: u32, chunk: usize, frames: usize) -> Option<(usize,
     let offset = addr % chunk;
     (idx < frames && len > 0 && len as usize <= chunk - offset).then_some((idx, offset))
 }
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
     #[test]
     fn rx_offset_comes_from_descriptor() {
         assert_eq!(decode_rx(4096 + 256, 1500, 4096, 4), Some((1, 256)));
         assert_eq!(decode_rx(4000, 200, 4096, 4), None);
         assert_eq!(decode_rx(u64::MAX, 1, 4096, 4), None);
     }
+
     #[test]
     fn configuration_rejects_invalid_geometry_before_syscalls() {
         let mut cfg = XdpConfig::default();

@@ -29,6 +29,7 @@ pub struct TelemetryConfig {
     pub export_interval: Duration,
     pub heartbeat_interval: Duration,
 }
+
 impl TelemetryConfig {
     pub fn new(client: SocketAddr) -> Self {
         Self {

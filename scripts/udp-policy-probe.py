@@ -16,6 +16,18 @@ import time
 
 def report(path):
     rows = json.loads(path.read_text())
+    medium = ''
+    if rows and 'medium' in rows[0]:
+        r = rows[0]
+        medium = ('<p>Wi-Fi lab: medium = '+html.escape(r['medium'])+
+                  '; configured radio frame loss AP → station = '+str(r['ap_loss'])+
+                  ', station → AP = '+str(r['station_loss'])+
+                  '. Radio settings remain constant across phases. Congestion uses a '
+                  '32-packet queue, 40 ± 10 ms delay and 1 Mbit/s in both directions; '
+                  'outage drops all station egress packets. Recovered restores the '
+                  'baseline netem settings. See JSON and station/qdisc snapshots for '
+                  'the full configuration. Recovery is observed with new UDP sockets; '
+                  'this does not measure recovery time of a persistent application.</p>')
     body = []
     for r in rows:
         success = 100 * r['received'] / r['requested']
@@ -27,7 +39,7 @@ def report(path):
 <style>body{font:16px system-ui;max-width:1150px;margin:40px auto;background:#101827;color:#eef3ff}table{border-collapse:collapse;width:100%}td,th{padding:12px;text-align:left;border-bottom:1px solid #34445c}meter{width:100px}p{line-height:1.6;color:#b9c9e2}</style>
 <h1>UDP: pacing, bounded work, and the network environment</h1>
 <p>Actual run results. Each row sends the same number and size of requests. Burst uses a 256-request window; paced uses 32 and 300 requests/sec. Neither retries. Compare deadline success and p99 latency alongside throughput and total time: pacing is allowed to take longer. This is an application-policy comparison, not a maximum stack-throughput benchmark.</p>
-<table><thead><tr><th>Repeat</th><th>Network</th><th>Policy</th><th>Deadline success</th><th>p99 RTT ms</th><th>Expired</th><th>Payload Mb/s</th><th>Seconds</th></tr></thead><tbody>'''+''.join(body)+'''</tbody></table>
+'''+medium+'''<table><thead><tr><th>Repeat</th><th>Network</th><th>Policy</th><th>Deadline success</th><th>p99 RTT ms</th><th>Expired</th><th>Payload Mb/s</th><th>Seconds</th></tr></thead><tbody>'''+''.join(body)+'''</tbody></table>
 <p>Unanswered requests expire after 500 ms. Delayed responses after expiry do not count as success. Netem models packet impairments, not RF propagation, association or Wi-Fi retransmissions. Random seeds and wall-clock scheduling are not controlled by this comparison. Repeat runs and preserve the JSON/configuration.</p>''')
     print(out)
 

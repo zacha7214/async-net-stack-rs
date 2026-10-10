@@ -3,15 +3,11 @@
 ## Frame ownership
 
 The pool owns a single zero-initialized arena and a bounded index free list.
-`PacketBuf` holds a non-atomic `Rc` to the pool; XDP pools additionally retain the
-UMEM mapping. Safe slice access includes the entire initialized frame. Handles
-are exclusive and remain `!Send`/`!Sync`. Pool metadata stays valid if the device
-moves, and packets remain usable after the device drops.
+`PacketBuf` holds a non-atomic `Rc` to the pool; XDP pools additionally retain the UMEM mapping. Safe slice access includes the entire initialized frame. Handles are exclusive and remain `!Send`/`!Sync`. Pool metadata stays valid if the device moves, and packets remain usable after the device drops.
 
 A successful send replaces accepted handles with empty, zero-capacity values.
 There are no manually dropped-but-still-live Rust values, cloned raw owners, or
-accessible stale packet pointers. The copying backends consume only successfully
-written packets; XDP and io_uring transfer buffers into completion-owned state.
+accessible stale packet pointers. The copying backends consume only successfully written packets. XDP and io_uring transfer buffers into completion-owned state.
 
 ## AF_XDP changes
 
@@ -75,8 +71,7 @@ can complete out of order; these APIs do not promise ordered UDP delivery.
 
 Batching reduces potential syscall cost, **not TUN's payload copy**. At low load,
 extra ring bookkeeping can cost more than direct read/write. Registered buffers,
-SQPOLL, multishot receives, and io_uring ZC RX are separate future experiments;
-none is silently enabled or claimed here.
+SQPOLL, multishot receives, and io_uring ZC RX are separate future experiments.
 
 ## macOS
 
@@ -86,16 +81,13 @@ Two iovecs send that prefix plus the existing packet without changing headroom.
 The kqueue benchmark updates statistics once per batch. macOS affinity tags are
 advisory and do not pin a worker to an exact CPU.
 
-## Next modules worth implementing
+## Next modules that I may explore implementing
 
-1. A shared XSKMAP/program manager and one worker per RX queue, with explicit RSS
+1. A shared XSKMAP/program manager and one worker per RX queue, with RSS
    steering. Separate devices cannot each attach their own program to one NIC.
-2. Extend the [Ethernet/IPv4 adapter](ethernet-ipv4.md), which now supplies bounded
-   ARP/neighbor state, static routing, virtual timers and packet queues. Follow-ups
-   include VLAN-aware interfaces, multiple local addresses and ICMP error dispatch.
-3. UDP socket demultiplexing and an executor-facing readiness API. Keep timeout
+2. UDP socket demultiplexing and an executor-facing readiness API. Keep timeout
    ownership separate from device buffers before introducing TCP connection state.
 4. Multi-buffer XDP: capability negotiation, descriptor continuation chains,
    bounded scatter/gather packet views, and completion tests before enabling SG.
-5. An AF_PACKET baseline using sendmmsg/recvmmsg or TPACKET_V3, then compare it to
-   generic XDP copy without conflating syscall and copy costs.
+5. AF_PACKET baseline using sendmmsg/recvmmsg or TPACKET_V3. Compare it to
+   generic XDP copy without syscall and copy costs altering the results.

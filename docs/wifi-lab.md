@@ -22,7 +22,7 @@ For Multipass, install the added userspace prerequisites once inside the builder
 ```sh
 multipass exec <mutilpass instance name> -- sudo apt-get update
 multipass exec <mutilpass instance name> -- sudo apt-get install -y \
-  iproute2 iw hostapd wpasupplicant wireless-regdb
+  iproute2 iw hostapd wpasupplicant wireless-regdb wmediumd
 ```
 
 Then rebuild, export and run the test from the checkout:
@@ -44,7 +44,7 @@ Use your actual source volume name. To bind-mount an existing kernel tree instea
 replace `--source-volume ...` with `--source /absolute/path/to/linux`. See the
 [kernel guide](kernel-lab.md) for initially populating a source volume and the
 case-sensitive filesystem requirement. The container image now includes the
-Wi-Fi tools, and its default tag changed to `async-net-kernel-lab:24.04-wifi1` so
+Wi-Fi tools, and its default tag changed to `async-net-kernel-lab:24.04-wifi2` so
 an older cached image will not silently omit them. Custom `--image` users must
 update their image too. Existing build work/source volumes are reused.
 
@@ -155,7 +155,99 @@ run cleanup; rebooting the disposable guest clears that state.
 
 ## Validation status
 
-Python syntax, shell syntax, CLI help and test-menu checks were run on macOS.
-The kernel rebuild, initramfs boot and privileged hwsim datapath have **not** been
-run for this change; those are the manual checks above. A useful second check is
-running the held lab twice in the same guest to confirm radio cleanup/reuse.
+The wmediumd/netem addition has not been built, syntax-checked, or run; validation
+is left to the user. A useful manual check is running the held lab twice in the
+same guest to confirm radio and qdisc cleanup/reuse.
+
+## Radio loss plus queueing faults
+
+The launcher now supports two independently configured layers:
+
+* `--medium wmediumd` sends simulated wireless frames through a supervised
+  wmediumd process. `--ap-loss` and `--station-loss` are directional frame-error
+  probabilities from 0 to 1. They apply during association too. Retries mean a
+  20% frame-error probability does **not** imply 20% application packet loss.
+* `--netem-ap` and `--netem-station` configure egress queues on those interfaces
+  after the initial association/discovery/TCP check. They affect queued traffic,
+  including ARP, independently of the radio model. AP egress primarily affects
+  echo replies; station egress affects requests. They do not model RF behavior.
+
+Defaults retain the original kernel medium with no additional qdisc. Available
+netem profiles are `clean` (1000-packet limit), `delay` (40 ± 10 ms, 100-packet
+limit), `lossy` (same delay plus 5% loss), `congested` (40 ± 10 ms, 1 Mbit/s,
+32-packet limit), and `outage` (100% loss). These live in `NETEM` in
+`scripts/linux-wifi-lab.py`; change those definitions to create another scenario.
+The jitter uses netem's default distribution. A clean profile still has a finite
+queue and can drop packets when overloaded.
+
+On a disposable Ubuntu VM with two unused hwsim radios:
+
+```sh
+sudo apt-get install iproute2 iw hostapd wpasupplicant wireless-regdb wmediumd
+sudo modprobe mac80211_hwsim radios=2
+sudo python3 scripts/linux-wifi-lab.py --guest-auto \
+  --medium wmediumd --ap-loss 0.01 --station-loss 0.20 \
+  --netem-ap delay --netem-station lossy --hold
+```
+
+Skip modprobe when radios already exist. wmediumd mode requires exactly two
+hwsim radios visible in the launching namespace and refuses an already running
+wmediumd process. Use a dedicated VM with radios created in its initial network
+namespace; namespace isolation does not make medium registration private to an
+arbitrary pair of radios. The lab starts wmediumd before moving the PHYs, using
+their actual MAC addresses in a saved config. It uses OFDM-only BSS rates on
+channel 1 to avoid the CCK rate-table mismatch described by
+[upstream wmediumd](https://github.com/bcopeland/wmediumd#rates).
+
+For the bundled QEMU guest, rebuild using the earlier instructions, then boot
+`python3 scripts/qemu-lab.py --test shell`. Inside the guest:
+
+```sh
+wifi-lab --guest-auto --medium wmediumd \
+  --ap-loss 0.01 --station-loss 0.20 --compare --hold
+```
+
+The rebuilt bundle includes wmediumd, tc, their dependencies, the UDP policy
+probe, and built-in `CONFIG_NET_SCHED=y` / `CONFIG_NET_SCH_NETEM=y`. Its manifest
+includes `wifi-wmediumd-netem`. Older bundles must be rebuilt. The ordinary
+`--test wifi` boot remains the original smoke check; use shell mode for these
+longer experiments. Guest results live in RAM: copy them out before poweroff.
+
+## UDP policy comparison and recovery observations
+
+`--compare` runs three repetitions of four phases: the requested baseline
+netem profiles, congestion in both directions, a complete station-egress outage,
+then restoration of the baseline. wmediumd settings remain constant. Each phase
+compares burst/window-256 with paced/window-32 at 300 requests/sec, alternating
+policy order between repetitions. Every row attempts 300 requests of 512 bytes
+with a 500 ms deadline and no application retries. The lab provides a separate
+UDP echo endpoint at `10.78.0.1:9002` for this workload.
+
+The printed run directory contains:
+
+* `comparison.html`: deadline-success bars, p99 RTT, expirations and goodput.
+* `comparison.json`: incremental measurements, including directions/profiles.
+* `environment.json` and `wmediumd.cfg`: launch settings and radio mapping.
+* Initial and per-phase JSON snapshots: addresses, `iw station dump`, and
+  `tc -s -j qdisc` counters, plus daemon and per-workload logs.
+
+An outage is a measured result, not a failed assertion. Completion does not
+guarantee recovery: inspect the recovered rows against baseline. Each workload
+uses a fresh UDP socket; this measures resumed network availability, not recovery
+latency of a persistent application. The radio remains associated during the
+netem outage; AP restarts, reassociation, DHCP renewal and SNR/path-loss/mobility
+models remain separate future scenarios.
+
+The measurements currently use Linux sockets and the Python echo service, not
+the Rust UDP stack. Pacing can improve deadline success but also increases run
+time; the report does not assume it always wins. Seeds and host scheduling are
+not controlled, so repeat runs. A one-second gap between phase changes lets
+short queues drain; replacing a qdisc can itself discard pending packets.
+
+wmediumd logs startup/errors at level 5, avoiding per-frame log I/O. The launcher
+waits for its registration message and supervises it throughout measurements;
+that message alone is not proof of frame delivery. A daemon exit aborts the run
+instead of accepting subsequent perfect-medium results. Cleanup removes the
+lab's qdiscs before returning the radios and retains all files for inspection.
+Upstream references: [wmediumd configuration](https://github.com/bcopeland/wmediumd#configuration)
+and [Linux hwsim](https://wireless.docs.kernel.org/en/latest/en/users/drivers/mac80211_hwsim.html).

@@ -42,6 +42,11 @@ pub trait Device {
         Ok(())
     }
 
+    /// Adapter timer hint; raw devices normally have no protocol deadlines.
+    fn next_deadline(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Clear/recycle the previous `out`, then receive up to `max` frames.
     /// The device populates `out` with [`PacketBuf`]s
     /// backed by the device's own pool. For zero-copy backends, these may be

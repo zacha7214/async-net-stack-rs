@@ -60,7 +60,7 @@ def copy_runtime(root, executable, destination):
 
 
 def wifi_runtime(root, project):
-    for name in ('ip', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli'):
+    for name in ('ip', 'tc', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli', 'wmediumd'):
         copy_runtime(root, shutil.which(name), '/bin/'+name)
     copy_runtime(root, sys.executable, '/bin/python3')
     stdlib = Path(sysconfig.get_path('stdlib'))
@@ -73,6 +73,12 @@ def wifi_runtime(root, project):
         original = stdlib / extension.relative_to(target)
         copy_runtime(root, original, '/'+str(extension.relative_to(root)))
     shutil.copy2(project/'scripts/linux-wifi-lab.py', root/'bin/linux-wifi-lab.py')
+    shutil.copy2(project/'scripts/udp-policy-probe.py', root/'bin/udp-policy-probe.py')
+    # tc can load qdisc parsers dynamically; ldd alone does not capture these.
+    multiarch = sysconfig.get_config_var('MULTIARCH') or ''
+    for directory in ('/usr/lib/tc', '/usr/lib/'+multiarch+'/tc'):
+        for plugin in Path(directory).glob('*.so'):
+            copy_runtime(root, plugin, str(plugin))
     # Preserve the builder interpreter's prefix even though the executable is /bin.
     import shlex
     (root/'bin/wifi-lab').write_text('#!/bin/sh\nexport PYTHONHOME='+shlex.quote(sys.base_prefix)+
@@ -106,10 +112,10 @@ def main():
     if not marker.exists() and any(work.iterdir()): p.error('work is nonempty and not owned by this helper')
     marker.touch()
     for tool in ('make', 'gcc', 'flex', 'bison', 'bc', 'cpio', 'nm', 'readelf', 'busybox', 'cargo',
-                 'ip', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli'):
+                 'ip', 'tc', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli', 'wmediumd'):
         if not shutil.which(tool):
             p.error(f'missing prerequisite: {tool}; Wi-Fi tools: '
-                    'sudo apt-get install iproute2 iw hostapd wpasupplicant wireless-regdb')
+                    'sudo apt-get install iproute2 iw hostapd wpasupplicant wireless-regdb wmediumd')
     busybox = Path(shutil.which('busybox')).resolve()
     if 'INTERP' in output(['readelf', '-l', busybox]): p.error('install busybox-static first')
     if (source / '.config').exists(): p.error('source has an in-tree .config; use a clean source checkout for O= builds')
@@ -126,7 +132,7 @@ def main():
                 'FUTEX', 'MULTIUSER', 'BPF_SYSCALL', 'BPF_JIT', 'XDP_SOCKETS',
                 'VIRTIO_PCI', 'VIRTIO_NET', 'PROC_PAGE_MONITOR', 'DEBUG_INFO',
                 'DEBUG_INFO_DWARF4', 'GDB_SCRIPTS', 'KALLSYMS', 'NAMESPACES', 'NET_NS',
-                'CFG80211', 'MAC80211', 'MAC80211_HWSIM', 'PACKET')
+                'CFG80211', 'MAC80211', 'MAC80211_HWSIM', 'PACKET', 'NET_SCHED', 'NET_SCH_NETEM')
     missing = [s for s in required if f'CONFIG_{s}=y\n' not in config]
     if missing: raise RuntimeError(f'Kconfig did not enable required options: {missing}')
     for s in ('RANDOMIZE_BASE', 'MODULES', 'DEBUG_INFO_REDUCED', 'DEBUG_INFO_SPLIT'):
@@ -186,7 +192,7 @@ def main():
                     source_commit=output(['git', '-C', source, 'rev-parse', 'HEAD']),
                     source_status=output(['git', '-C', source, 'status', '--short']),
                     compiler=output(['gcc', '--version']).splitlines()[0], symbols=symbols,
-                    features=['wifi-hwsim'],
+                    features=['wifi-hwsim', 'wifi-wmediumd-netem'],
                     cmdline='console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr loglevel=8 panic=0 mac80211_hwsim.radios=2',
                     sha256={f.name: hashlib.sha256(f.read_bytes()).hexdigest()
                             for f in bundle.iterdir() if f.is_file()})

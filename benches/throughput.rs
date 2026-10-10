@@ -123,6 +123,7 @@ fn bench_batch_api(c: &mut Criterion) {
                                 bufs.push(dev.alloc().unwrap());
                             }
                         }
+
                         black_box(&bufs);
                         bufs.clear();
                     });
@@ -142,18 +143,22 @@ fn bench_batched_pipeline(c: &mut Criterion) {
     for &payload in &[64usize, 512, 1500] {
         for &batch in &[1usize, 8, 32, 64, 256] {
             group.throughput(Throughput::Bytes((payload * batch) as u64));
+
             group.bench_function(BenchmarkId::new(format!("bytes_{payload}"), batch), |b| {
                 let mut dev = LoopbackDevice::with_capacity(batch * 2, batch * 2);
                 let mut tx = Vec::with_capacity(batch);
                 let mut rx = Vec::with_capacity(batch);
+
                 b.iter(|| {
                     tx.clear();
                     rx.clear();
+
                     assert_eq!(dev.alloc_batch(batch, &mut tx), batch);
                     for buf in &mut tx {
                         buf.set_len(payload);
                         buf.as_mut_packet().fill(0xab);
                     }
+
                     assert_eq!(dev.send(&mut tx).unwrap(), batch);
                     assert_eq!(dev.recv(batch, &mut rx).unwrap(), batch);
                     for buf in &rx {

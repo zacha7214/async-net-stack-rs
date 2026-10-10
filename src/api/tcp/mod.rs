@@ -2,8 +2,8 @@
 //!
 //! Use TUN/SimDevice directly, or EthernetIpv4<XdpDevice> for Ethernet. `poll`
 //! advances the adapter clock, receives segments, and drives TCP output. This
-//! pool owns its device's receive stream; do not independently poll a UdpPool
-//! over the same device. Shared UDP/TCP dispatch is a subsequent extension.
+//! pool owns its device's receive stream. Use separate protocol ports from
+//! `crate::coordinator::Coordinator` to share one interface with UDP.
 //!
 //! The sender uses bounded flight queues, slow start and congestion avoidance.
 //! Receive delivery is in order: out-of-order data is ACKed but not buffered.
@@ -236,12 +236,24 @@ pub struct TcpPool<D> {
     rx: Vec<PacketBuf>,
     now: Duration,
     next_id: u64,
+    sequence_source: Box<dyn FnMut() -> io::Result<u32>>,
     stats: TcpStats,
     events: VecDeque<TcpEvent>,
 }
 
 impl<D: Device> TcpPool<D> {
     pub fn new(device: D, config: TcpConfig) -> io::Result<Self> {
+        Self::with_sequence_source(device, config, initial_sequence)
+    }
+
+    /// Supply initial sequence numbers for reproducible simulations or platform
+    /// entropy integration. Live networks require an unpredictable source; a
+    /// fixed or seeded simulation source is not appropriate for deployment.
+    pub fn with_sequence_source(
+        device: D,
+        config: TcpConfig,
+        sequence_source: impl FnMut() -> io::Result<u32> + 'static,
+    ) -> io::Result<Self> {
         if config.max_connections == 0
             || config.max_listeners == 0
             || config.control_capacity == 0
@@ -284,6 +296,7 @@ impl<D: Device> TcpPool<D> {
             rx: Vec::new(),
             now: Duration::ZERO,
             next_id: 1,
+            sequence_source: Box::new(sequence_source),
             stats: TcpStats::default(),
             events: VecDeque::with_capacity(if config.verbose_state {
                 config.event_capacity
@@ -333,7 +346,7 @@ impl<D: Device> TcpPool<D> {
     }
 
     /// Queues an active open. Poll until status becomes Established or terminal.
-    /// Sequence numbers use OS entropy on the supported Unix hosts.
+    /// Sequence numbers use the configured source (OS entropy by default).
     pub fn connect(
         &mut self,
         local: SocketAddrV4,
@@ -357,7 +370,7 @@ impl<D: Device> TcpPool<D> {
             ));
         }
 
-        let sequence = initial_sequence()?;
+        let sequence = (self.sequence_source)()?;
         let id = self.allocate_id()?;
         self.connections.insert(
             id,
@@ -639,7 +652,7 @@ impl<D: Device> TcpPool<D> {
                 return Ok(());
             }
 
-            let sequence = initial_sequence()?;
+            let sequence = (self.sequence_source)()?;
             let id = self.allocate_id()?;
             self.connections.insert(
                 id,

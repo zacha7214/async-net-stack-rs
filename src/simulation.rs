@@ -217,10 +217,12 @@ impl Device for SimDevice {
         let mut accepted = 0;
         for frame in frames {
             let packet = frame.as_slice();
+
             if packet.len() < 20 || packet[0] >> 4 != 4 || packet.len() > 2048 {
                 if accepted != 0 {
                     break;
                 }
+
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "fabric expects IPv4 frames",

@@ -37,3 +37,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.75.0
       - run: cargo check --locked --all-targets --all-features
+
+  capture-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 ethtool
+      - run: cargo build --locked --bins
+      - run: sudo python3 scripts/capture-bundle-smoke.py

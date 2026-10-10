@@ -76,6 +76,7 @@ mod tests {
             mac: [0; 6],
             udp_port: Some(9000),
         };
+
         assert_eq!(responder.respond(&mut buf, LinkLayer::Ip), Reply::Udp);
 
         let p = buf.as_slice();

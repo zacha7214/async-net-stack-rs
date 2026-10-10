@@ -19,7 +19,6 @@ use std::error::Error as StdError;
 use std::io;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(target_os = "macos")]
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,6 +50,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
     let shards: usize = flag(&args, "--shards")
         .map(|s| s.parse().expect("--shards must be an integer"))
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+
     let duration = Duration::from_secs(
         flag(&args, "--duration")
             .map(|s| s.parse().expect("--duration must be an integer (seconds)"))
@@ -212,6 +212,7 @@ fn run_reactor(shards: usize, duration: Duration) -> Result<(), Box<dyn StdError
         p as f64 / total / 1e6,
         b as f64 * 8.0 / total / 1e9
     );
+
     Ok(())
 }
 

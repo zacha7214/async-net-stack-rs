@@ -51,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Link::default()
             },
         )?;
+
         let mut worker = UdpPool::new(device, 128, 1)?;
         worker.bind(Service { address, id: 7 })?;
         workers.push(worker);

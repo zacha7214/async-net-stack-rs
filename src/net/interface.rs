@@ -5,6 +5,7 @@ use super::{
     neighbor::NeighborState,
     route::{self, Route, RouteTable},
 };
+
 use crate::device::{Device, PacketBuf};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -18,8 +19,10 @@ pub struct InterfaceConfig {
     pub address: Ipv4Addr,
     pub prefix_len: u8,
     pub mac: [u8; 6],
+
     /// Maximum IPv4 datagram size, excluding Ethernet headers.
     pub mtu: usize,
+
     /// Shared bound across unresolved and ready data packets.
     pub tx_capacity: usize,
     pub per_neighbor_capacity: usize,
@@ -31,6 +34,7 @@ pub struct InterfaceConfig {
     pub resolution_timeout: Duration,
     pub failed_retry_delay: Duration,
     pub max_arp_attempts: u32,
+
     /// Zero disables traces. Oldest events are overwritten when full.
     pub event_capacity: usize,
 }
@@ -226,11 +230,13 @@ impl<D: Device> EthernetIpv4<D> {
                 "gateway must be a distinct on-link unicast address",
             ));
         }
+
         let mut routes = RouteTable::new(self.config.route_capacity);
         routes.insert(connected)?;
         if let Some(ip) = gateway {
             routes.insert(Route::new(Ipv4Addr::UNSPECIFIED, 0, Some(ip))?)?;
         }
+
         if self.configured
             && self.config.address == address
             && self.config.prefix_len == prefix
@@ -244,6 +250,7 @@ impl<D: Device> EthernetIpv4<D> {
         self.config.address = address;
         self.config.prefix_len = prefix;
         self.configured = true;
+
         Ok(true)
     }
 
@@ -255,6 +262,7 @@ impl<D: Device> EthernetIpv4<D> {
         self.routes = RouteTable::new(self.config.route_capacity);
         self.configured = false;
     }
+
     pub fn is_configured(&self) -> bool {
         self.configured
     }
@@ -262,22 +270,28 @@ impl<D: Device> EthernetIpv4<D> {
     pub fn config(&self) -> &InterfaceConfig {
         &self.config
     }
+
     pub fn stats(&self) -> InterfaceStats {
         self.stats
     }
+
     pub fn routes(&self) -> &RouteTable {
         &self.routes
     }
+
     pub fn neighbors(&self) -> impl Iterator<Item = (&Ipv4Addr, &NeighborState)> {
         self.neighbors.iter()
     }
+
     /// Queued data and control packets, excluding device-owned in-flight TX.
     pub fn pending(&self) -> usize {
         self.pending.len() + self.ready.len() + self.control.len()
     }
+
     pub fn device_mut(&mut self) -> &mut D {
         &mut self.device
     }
+
     pub fn pop_event(&mut self) -> Option<(Duration, InterfaceEvent)> {
         self.events.pop_front()
     }
@@ -330,11 +344,13 @@ impl<D: Device> EthernetIpv4<D> {
         {
             return Err(invalid("invalid static neighbor"));
         }
+
         if !self.neighbors.contains_key(&ip)
             && self.neighbors.len() == self.config.neighbor_capacity
         {
             return Err(blocked("neighbor table full"));
         }
+
         // A previously framed packet might contain the old MAC.
         if self
             .neighbors
@@ -347,10 +363,12 @@ impl<D: Device> EthernetIpv4<D> {
         {
             self.discard_queued();
         }
+
         self.cancel_probes(ip);
         self.neighbors.insert(ip, NeighborState::Static { mac });
         self.event(InterfaceEvent::NeighborResolved { ip, mac });
         self.release_resolved();
+
         Ok(())
     }
 
@@ -369,6 +387,7 @@ impl<D: Device> EthernetIpv4<D> {
         if now < self.now {
             return Err(invalid("time went backwards"));
         }
+
         self.now = now;
         self.ensure_spare();
         let mut work = std::mem::take(&mut self.neighbor_work);
@@ -389,10 +408,13 @@ impl<D: Device> EthernetIpv4<D> {
                             retry_after: now.saturating_add(self.config.failed_retry_delay),
                         },
                     );
+
                     let before = self.pending.len();
                     self.pending.retain(|p| p.next_hop != ip);
+
                     let dropped = before - self.pending.len();
                     self.cancel_probes(ip);
+
                     self.stats.timeout_drops += dropped as u64;
                     self.stats.neighbor_timeouts += 1;
                     self.event(InterfaceEvent::NeighborTimedOut { ip, dropped });
@@ -409,6 +431,7 @@ impl<D: Device> EthernetIpv4<D> {
                         target_mac: [0; 6],
                         target_ip: ip,
                     };
+
                     if self.queue_arp(request, eth::BROADCAST) {
                         let attempt = attempts + 1;
                         self.neighbors.insert(
@@ -419,6 +442,7 @@ impl<D: Device> EthernetIpv4<D> {
                                 expires,
                             },
                         );
+
                         self.stats.arp_requests_queued += 1;
                         self.event(InterfaceEvent::ArpRequestQueued {
                             target: ip,
@@ -429,6 +453,7 @@ impl<D: Device> EthernetIpv4<D> {
                 _ => {}
             }
         }
+
         work.clear();
         self.neighbor_work = work;
         self.release_resolved();
@@ -653,16 +678,19 @@ impl<D: Device> EthernetIpv4<D> {
             self.stats.ignored += 1;
             return;
         }
+
         let Some((destination_mac, source_mac, kind)) = eth::parse(frame.as_slice()) else {
             self.stats.malformed += 1;
             return;
         };
+
         if !eth::unicast(source_mac)
             || (destination_mac != self.config.mac && destination_mac != eth::BROADCAST)
         {
             self.stats.ignored += 1;
             return;
         }
+
         match kind {
             eth::ARP => self.receive_arp(&frame.as_slice()[eth::HEADER..], source_mac),
             eth::IPV4 => {
@@ -689,6 +717,13 @@ impl<D: Device> EthernetIpv4<D> {
 }
 
 impl<D: Device> Device for EthernetIpv4<D> {
+    fn next_deadline(&self) -> Option<Duration> {
+        EthernetIpv4::next_deadline(self)
+            .into_iter()
+            .chain(self.device.next_deadline())
+            .min()
+    }
+
     fn poll_at(&mut self, now: Duration) -> io::Result<()> {
         self.device.poll_at(now)?;
         self.advance(now)
@@ -725,6 +760,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
                 "IPv4 configuration withdrawn",
             ));
         }
+
         let available = self.config.tx_capacity - self.pending.len() - self.ready.len();
         let limit = available.min(frames.len());
 
@@ -772,6 +808,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
             // The complete prospective prefix was validated above.
             let destination =
                 Ipv4Addr::from(<[u8; 4]>::try_from(&slot.as_slice()[16..20]).unwrap());
+
             if self.broadcast(destination) {
                 let mut frame = std::mem::take(slot);
                 eth::prepend(&mut frame, self.config.mac, eth::BROADCAST, eth::IPV4);
@@ -780,13 +817,15 @@ impl<D: Device> Device for EthernetIpv4<D> {
                 let route = self.routes.lookup(destination).unwrap();
                 let next_hop = route.next_hop(destination);
                 let mac = self.neighbors.get(&next_hop).and_then(|n| n.mac(self.now));
+
                 if mac.is_none() {
-                    if self
+                    let pending_over_capacity = self
                         .pending
                         .iter()
                         .filter(|p| p.next_hop == next_hop)
                         .count()
-                        >= self.config.per_neighbor_capacity
+                        >= self.config.per_neighbor_capacity;
+                    if pending_over_capacity
                         || (!self.neighbors.contains_key(&next_hop)
                             && self.neighbors.len() == self.config.neighbor_capacity)
                     {
@@ -861,8 +900,8 @@ fn prepare_empty(frame: &mut PacketBuf) -> io::Result<()> {
             "frame cannot hold Ethernet headers and minimum padding",
         ));
     }
-
     frame.set_headroom(headroom);
+
     Ok(())
 }
 

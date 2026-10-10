@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         hostapd \
         wpasupplicant \
         wireless-regdb \
+        wmediumd \
     && rm -rf /var/lib/apt/lists/*
 
 # The kernel tree arrives as a bind mount owned by the host user. git refuses to

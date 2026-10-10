@@ -25,6 +25,11 @@ BUILD    := $(TOPDIR)/build
 
 LIBBPF_DIR    := $(DEPS)/libbpf
 LIBBPF_TAG    := v1.5.0
+# Keep this pinned dependency out of C23 mode, including when inherited CFLAGS
+# replace libbpf's own -std=gnu89 default. C23 string-search macros preserve
+# const qualifiers, which this release does not consistently handle.
+# Append after caller flags; retain all upstream warnings and -Werror settings.
+LIBBPF_EXTRA_CFLAGS ?= -std=gnu17
 XDP_TOOLS_DIR := $(DEPS)/xdp-tools
 XDP_TOOLS_TAG := v1.6.3
 
@@ -47,7 +52,8 @@ $(LIBBPF_A):
 	test -d $(LIBBPF_DIR)/.git || \
 		git clone --depth 1 --branch $(LIBBPF_TAG) \
 			https://github.com/libbpf/libbpf $(LIBBPF_DIR)
-	$(MAKE) -C $(LIBBPF_DIR)/src BUILD_STATIC_ONLY=1
+	$(MAKE) -C $(LIBBPF_DIR)/src BUILD_STATIC_ONLY=1 \
+		EXTRA_CFLAGS="$(EXTRA_CFLAGS) $(LIBBPF_EXTRA_CFLAGS)"
 
 # xdp-tools is configured against our in-tree libbpf build via LIBBPF_DIR.
 # Its configure requires pkg-config'able libelf, zlib and libpcap even

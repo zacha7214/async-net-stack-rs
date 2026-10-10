@@ -19,7 +19,7 @@ import lab_builders  # noqa: E402
 
 OK, WARN, FAIL = 'ok', 'warn', 'FAIL'
 VM_TOOLS = ('make', 'gcc', 'flex', 'bison', 'bc', 'cpio', 'nm', 'readelf', 'busybox', 'cargo',
-            'ip', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli')
+            'ip', 'tc', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli', 'wmediumd')
 
 
 class Report:
@@ -115,7 +115,7 @@ def check_builder(r, builder, source, work):
     gaps = missing.split()
     r.add(OK if not gaps else FAIL, 'vm toolchain', 'complete' if not gaps else 'missing: ' + ' '.join(gaps),
           'sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev '
-          'busybox-static cpio iproute2 iw hostapd wpasupplicant wireless-regdb' +
+          'busybox-static cpio iproute2 iw hostapd wpasupplicant wireless-regdb wmediumd' +
           ('; install Rust via rustup' if 'cargo' in gaps else ''))
 
     code, _ = vm('bash', '-lc', 'readelf -l "$(command -v busybox)" | grep -q INTERP')

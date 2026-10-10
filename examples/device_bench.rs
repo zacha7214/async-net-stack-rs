@@ -348,10 +348,12 @@ fn run<D: BenchDevice>(mut dev: D, args: &Args, link: LinkLayer) -> Result<(), B
                     }
                 }
             }
+
             dev.progress()?;
             if let Some(sample) = sample {
                 latencies.push(sample.elapsed().as_nanos() as u64);
             }
+
             if work == 0 {
                 empty_polls += 1;
                 if args.idle_us > 0 {

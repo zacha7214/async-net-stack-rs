@@ -20,7 +20,7 @@ a moved or dropped device without cloning payloads.
 
 `net::Responder` answers Ethernet ARP, IPv4 ICMP echo, and UDP echo in place.
 The Ethernet parser handles up to two VLAN tags. Fragmented IP, IPv4 options,
-IPv6/NDP, TCP, IP forwarding, multi-buffer XDP and shared-UMEM/multi-queue dispatch are
+IPv6/NDP, IP forwarding, multi-buffer XDP and shared-UMEM/multi-queue dispatch are
 not implemented. The device API is poll-based; it is not yet an async TCP socket
 API. `af_packet` remains an empty compatibility feature.
 
@@ -29,6 +29,57 @@ above an untagged Ethernet device, allowing `UdpPool` to run over AF_XDP. It has
 static/default routes, static and expiring dynamic neighbors, bounded queues,
 explicit timers, and optional route/neighbor diagnostic events. See the
 [Ethernet/IPv4 guide](docs/ethernet-ipv4.md) and `examples/xdp_pool.rs`.
+
+## Composable experiments
+
+`coordinator::Coordinator` shares one IPv4 interface between independent protocol
+engines through bounded `Device` ports. UDP discovery and native TCP can run
+together, with explicit polling, per-port transmission budgets, and observable
+queue drops. The initial TCP engine includes congestion control, retransmission,
+and connection teardown; it remains a lab implementation, not RFC-complete TCP.
+
+```sh
+cargo run --locked --example coordinator_lab
+```
+
+This deterministic example discovers a service over UDP, connects over TCP,
+injects a partition, and verifies recovery. See the [composition guide](docs/coordinator.md)
+for assembly, ownership, fault semantics, and current limits.
+
+## Linux capture bundles
+
+Collect a packet trace together with configuration snapshots and timed counters,
+then replay the latest completed workspace capture:
+
+```sh
+cargo build --locked --release --bins
+sudo ./target/release/net-capture --interface eth0 --duration 30
+./target/release/net-experiment > /tmp/experiment-report.json
+# Or select a particular bundle:
+./target/release/net-experiment results/traces/trace-EXAMPLE
+```
+
+Bundles live in `results/traces/` by default; `--root` or `ASYNC_NET_TRACE_DIR`
+selects another store. Linux collection uses tcpdump plus optional iproute2 and
+ethtool tools. Replay also works on macOS. Configuration and counters are ingested
+as context; they are not yet applied as simulated faults. See the
+[capture bundle guide](docs/capture-bundles.md) for the versioned JSON format,
+availability reporting, timing, and limits.
+
+## Offline capture replay
+
+Import a pcap/pcapng file, inventory its IPv4 conversations, and replay packets
+through the coordinator in recorded order using virtual time:
+
+```sh
+cargo run --locked --example trace_replay -- --demo
+cargo run --locked --example trace_replay -- capture.pcap
+```
+
+Original IP addresses and payloads are preserved. The report identifies skipped
+records, link-header removal, timestamp adjustments, and delivery lateness.
+This first stage is observed-packet playback, without live connection or route
+reconstruction. See the [capture replay guide](docs/trace-replay.md).
 
 ## Virtual pools and network behavior labs
 

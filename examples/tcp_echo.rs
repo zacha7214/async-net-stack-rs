@@ -28,10 +28,12 @@ use std::{
 struct Args {
     #[arg(long, default_value = "tun")]
     backend: String,
+
     /// Linux interface name, used verbatim (e.g. tun0 or labtun).
     #[cfg(not(target_os = "macos"))]
     #[arg(long, default_value = "labtun")]
     iface: String,
+
     /// macOS kernel-control unit: 0 auto-allocates; N > 0 requests utun(N-1).
     #[cfg(target_os = "macos")]
     #[arg(long, default_value_t = 0)]

@@ -57,6 +57,36 @@ make            # clones + builds deps/libbpf and deps/xdp-tools/libxdp,
 The first build downloads ~50 MB of git history. Everything runs as root or
 with `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_NET_RAW`.
 
+### New compiler/header compatibility
+
+The pinned libbpf v1.5.0 can fail with `-Werror=discarded-qualifiers` at
+`strstr(sym_name, ".llvm.")` or `strchr(s, ':')` when compiled in C23 mode.
+This is a known [upstream compatibility issue](https://github.com/libbpf/libbpf/issues/941).
+The Makefile passes `-std=gnu17` specifically to libbpf through its supported
+`EXTRA_CFLAGS` hook. It does not disable warning checks or change our BPF flags.
+libbpf itself defaults to GNU89, but inherited/command-line `CFLAGS` can replace
+that default; newer compiler defaults then matter if no standard is specified.
+
+After updating the Makefile, rebuild the dependency from this directory:
+
+```sh
+make -C deps/libbpf/src clean
+make -j2
+```
+
+This keeps the dependency checkout; `distclean` is unnecessary. For a direct
+dependency build without updating this Makefile:
+
+```sh
+make -C deps/libbpf/src BUILD_STATIC_ONLY=1 EXTRA_CFLAGS=-std=gnu17
+```
+
+If it still fails, use `V=1` on that command to inspect the complete compiler
+invocation, including inherited `CFLAGS`/`CPPFLAGS` and any later `-std=` option.
+Prefer an explicit compatible dialect or a reviewed upstream update over globally
+disabling `-Werror` or casting away `const` in downloaded source. The compatibility
+flag is configurable via `LIBBPF_EXTRA_CFLAGS` for future dependency upgrades.
+
 ## 3. Check feature support (zero-copy vs copy etc.)
 
 ```sh
