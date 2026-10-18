@@ -1,9 +1,10 @@
+use async_net_stack_rs::platform::io;
 use async_net_stack_rs::{
     device::{Device, PacketBuf},
     simulation::{AccessPoint, Link, SimDevice},
     transport::udp::build_ipv4,
 };
-use std::{io, net::Ipv4Addr, time::Duration};
+use std::{net::Ipv4Addr, time::Duration};
 
 fn port(ap: &AccessPoint, n: u8) -> SimDevice {
     ap.port(&[Ipv4Addr::new(10, 0, 0, n)], 8, 4).unwrap()

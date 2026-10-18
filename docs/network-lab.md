@@ -88,12 +88,13 @@ before moving the devices into pools, or later via `device_mut()`.
 | `drop_every` | Repeatable UDP loss and application timeout behavior |
 | `partitioned` | Asymmetric reachability, stale discovery and recovery |
 | `mtu` | Silent oversized-packet loss / PMTU black holes |
+| Shared bandwidth + byte queues | Serialization, bottleneck contention and overflow; see [guide](bandwidth-lab.md) |
 | Port queue size + frame count | Incast, head-of-line blocking and pool starvation |
 
 Reconfiguration resets that edge's loss sequence, but already queued packets
 retain their delivery times. The Nth **accepted** packet is dropped; a retry of
 an unsent packet does not advance the sequence. Unicast congestion is checked
-before faults. Full unicast queues return backpressure. Broadcast congestion
+before faults. Full unshaped unicast queues return backpressure; shaped queues drop accepted packets. Broadcast congestion
 or exhausted recipient frames drops that recipient's copy, avoiding duplicate
 broadcast delivery on retry. A partition does not cancel packets already queued.
 
@@ -101,8 +102,8 @@ Unicast moves owned packet handles without payload copies. A receiver retaining
 a packet keeps a sender arena frame occupied; this deliberate coupling makes
 frame-starvation scenarios visible. Broadcast copies into recipient arenas.
 The fabric has fixed 2048-byte frames (normal TX reserves headroom) and bounded
-packet queues, uses deadline sorting, and does not model bandwidth, Linux qdisc
-scheduling, retransmission, ICMP errors, routing protocols or Ethernet neighbors.
+packet queues, uses deadline sorting, and models optional FIFO bandwidth, but not Linux qdisc scheduling, ICMP errors,
+routing protocols or Ethernet neighbors. TCP retransmission belongs to `TcpPool`.
 It is a small topology/fault model, not a large-scale discrete-event simulator.
 
 ## Linux: real kernel UDP talking to virtual workers
@@ -151,9 +152,9 @@ Useful comparisons:
 The Python generator, timed polling and single process serving all virtual
 workers are part of these measurements. This is a behavior demo, not a claimed
 maximum packet rate. For datapath ceilings use the existing device benchmarks.
-The library's L3 API also accepts Linux io_uring TUN; AF_XDP/Ethernet neighbor
-resolution, reliable transfers, automatic load balancing, IPv6 and TCP remain
-future work.
+The library's L3 API also accepts Linux io_uring TUN. Ethernet neighbor resolution
+and native TCP now have separate adapters/engines; automatic load balancing and
+IPv6 remain future work.
 
 ## Validation
 

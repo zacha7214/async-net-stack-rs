@@ -1,6 +1,6 @@
 //! Ethernet/IPv4 ARP wire format (RFC 826). Offsets are relative to the ARP
 //! message, not the Ethernet frame. Parsing never learns a neighbor by itself.
-use std::net::Ipv4Addr;
+use crate::platform::net::Ipv4Addr;
 
 pub const LEN: usize = 28;
 

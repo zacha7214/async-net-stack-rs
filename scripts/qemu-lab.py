@@ -37,6 +37,7 @@ MACOS_HEADERS = 'qemu-vhost-net-macos-headers.patch'
 BINARY = 'qemu-system-aarch64'
 BACKEND = PROJECT/'target/release/examples/vhost_user_net'
 HVF_ENTITLEMENT = 'com.apple.security.hypervisor'
+
 # Used only if the checkout predates accel/hvf/entitlements.plist.
 ENTITLEMENTS = '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,10 +48,12 @@ ENTITLEMENTS = '''<?xml version="1.0" encoding="UTF-8"?>
 </dict>
 </plist>
 '''
+
 # The lab always runs with -display none, so no UI is built. Besides being smaller
 # and quicker, this keeps the build off frameworks that drift with the host SDK:
 # apple-gfx against ParavirtualizedGraphics is the one that breaks Mac rebuilds.
 HEADLESS = ('cocoa', 'pvg', 'vnc', 'gtk', 'sdl', 'curses', 'gio', 'docs')
+
 # build-kernel-lab.py publishes these; run-kernel-lab.py checksums the first four.
 BUNDLE_FILES = ('Image', 'vmlinux', 'System.map', 'config', 'initramfs.cpio.gz', 'manifest.json')
 
@@ -151,9 +154,11 @@ def check_build_tools():
     hint = ('brew install git ninja pkg-config glib pixman' if system == 'Darwin' else
             'sudo apt-get install -y git ninja-build pkg-config python3-venv '
             'libglib2.0-dev libpixman-1-dev')
+    
     missing = [t for t in ('git', 'ninja', 'pkg-config') if not shutil.which(t)]
     if missing:
         raise SystemExit(f'missing build prerequisites: {" ".join(missing)}\n  -> {hint}')
+    
     if probe(['pkg-config', '--exists', 'glib-2.0'])[0]:
         raise SystemExit(f'QEMU needs glib-2.0 development files\n  -> {hint}')
 
@@ -166,9 +171,12 @@ def obtain_source(src, ref, dry):
             print(f'  note: this tree is not {ref}. The patches were validated against '
                   f'{KNOWN_GOOD}; an apply failure below means the tree has moved past them.')
         return describe
+    
     if src.exists() and any(src.iterdir()):
         raise SystemExit(f'{src} exists and is not a git checkout; choose another --qemu-src')
+    
     src.parent.mkdir(parents=True, exist_ok=True)
+    
     # Shallow: this tree is built, not developed in. --ref takes a tag or a branch.
     run(['git', 'clone', '--depth', '1', '--branch', ref, UPSTREAM, src], dry)
     if dry:
@@ -179,13 +187,16 @@ def obtain_source(src, ref, dry):
 def apply_patches(src, dry):
     names = [QUEUE_RESET]
     if platform.system() == 'Darwin':
+        
         # The header fix has to land first, or the Mac build fails before linking.
         names.insert(0, MACOS_HEADERS)
+        
     applied = []
     for name in names:
         patch = PROJECT/'patches'/name
         if not patch.is_file():
             raise SystemExit(f'missing patch file: {patch}')
+        
         # A reverse-apply that checks out cleanly means the patch is already in.
         if probe(['git', '-C', src, 'apply', '--reverse', '--check', patch])[0] == 0:
             print(f'  already applied: {name}')
@@ -198,6 +209,7 @@ def apply_patches(src, dry):
             run(['git', '-C', src, 'apply', patch], dry)
             print(f'  applied: {name}')
         applied.append(name)
+        
     return applied
 
 
@@ -212,21 +224,25 @@ def headless_flags(src):
     # directory even for --help, so probe it from a directory we throw away.
     with tempfile.TemporaryDirectory(prefix='qemu-lab-probe-') as scratch:
         help_text = probe([str(src/'configure'), '--help'], cwd=scratch)[1]
+        
     listed = set()
     for line in help_text.splitlines():
         # Feature rows are indented exactly two spaces: "  cocoa   Cocoa user interface".
         if line.startswith('  ') and not line.startswith('   ') and len(line.split()) >= 2:
             listed.add(line.split()[0])
+            
     return [f'--disable-{name}' for name in HEADLESS if name in listed]
 
 
 def build_qemu(src, build, jobs, reconfigure, dry):
     build.mkdir(parents=True, exist_ok=True)
     accel = '--enable-hvf' if platform.system() == 'Darwin' else '--enable-kvm'
+    
     # --disable-werror: a git checkout defaults to -Werror, which turns an unrelated
     # new-compiler warning into a build failure on somebody else's machine.
     configure = ([str(src/'configure'), '--target-list=aarch64-softmmu', accel,
                   '--enable-vhost-user', '--disable-werror'] + headless_flags(src))
+    
     fresh = reconfigure or not (build/'build.ninja').is_file()
     if fresh:
         run(configure, dry, cwd=build)
@@ -244,6 +260,7 @@ def build_qemu(src, build, jobs, reconfigure, dry):
             f'  python3 {Path(__file__).name} --qemu-src {src} --reconfigure --build-only\n'
             'That also applies the headless feature set, which avoids the UI frameworks\n'
             'this lab never uses. Your existing binary is not touched until a link succeeds.')
+    
     return configure
 
 
@@ -259,12 +276,15 @@ def ensure_signed(binary, build, src, dry):
         plist = build/'lab-entitlements.plist'
         if not dry:
             plist.write_text(ENTITLEMENTS)
+            
     run(['codesign', '--entitlements', plist, '--force', '-s', '-', binary], dry)
+    
     if dry:
         return True
     if HVF_ENTITLEMENT not in probe(['codesign', '-d', '--entitlements', '-', binary])[1]:
         raise SystemExit('ad hoc signing did not take. Run it by hand:\n'
                          f'  codesign --entitlements {plist} --force -s - {binary}')
+    
     print('  signed ad hoc with ' + HVF_ENTITLEMENT)
     return True
 
@@ -273,6 +293,7 @@ def verify(binary):
     """Confirm the built binary can actually host the lab, and return its accelerators."""
     version = probe([binary, '--version'])[1].splitlines()
     print('  ' + (version[0] if version else 'no version output'))
+    
     # "-accel help" prints a header line and then one accelerator per line.
     accel = [line.strip() for line in probe([binary, '-accel', 'help'])[1].splitlines()[1:]
              if line.strip() and ' ' not in line.strip()]
@@ -285,8 +306,10 @@ def verify(binary):
             raise SystemExit(f'{binary} {why}; the data path will not work')
     wanted = 'hvf' if platform.system() == 'Darwin' else 'kvm'
     print(f'  accelerators: {" ".join(sorted(accel))}')
+    
     if wanted not in accel:
         print(f'  note: no {wanted}; runs fall back to TCG, which is for correctness only')
+        
     return accel
 
 
@@ -299,8 +322,10 @@ def write_provenance(binary, src, describe, patches, configure, signed, dry):
                   configure=configure, signed=signed, host=f'{platform.system()} {platform.machine()}',
                   built=datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
                   project=str(PROJECT))
+    
     if not dry:
         provenance_path(binary).write_text(json.dumps(record, indent=2)+'\n')
+        
     print(f'  provenance: {provenance_path(binary)}')
     return record
 
@@ -320,21 +345,25 @@ def check_bundle(bundle):
     if not bundle.is_dir():
         return None, f'{bundle} does not exist'
     manifest = bundle/'manifest.json'
+    
     if not manifest.is_file():
         return None, f'{bundle} has no manifest.json'
     try:
         data = json.loads(manifest.read_text())
     except ValueError:
         return None, 'manifest.json is not valid JSON'
+    
     for name in BUNDLE_FILES:
         if not (bundle/name).is_file():
             return None, f'bundle is missing {name}'
+        
     for name, digest in data.get('sha256', {}).items():
         target = bundle/name
         if target.is_file():
             with target.open('rb') as handle:
                 if hashlib.file_digest(handle, 'sha256').hexdigest() != digest:
                     return None, f'checksum mismatch: {name} (re-export the bundle)'
+                
     return data, ''
 
 
@@ -357,8 +386,10 @@ def builder_bundle(builder, work):
     try:
         with builder:
             remote = builder.capture(['cat', work.rstrip('/') + '/latest-bundle.txt'])
+            
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
+    
     return remote if remote.startswith('/') else None
 
 
@@ -463,28 +494,34 @@ def run_boot(step, pattern, dry):
     if not pattern:
         print(console)
         return 0
+    
     matched = [line for line in console.splitlines() if re.search(pattern, line)]
     for line in matched:
         print(line)
     if not matched:
         print(f'\nNothing on the console matched {pattern!r}. The tail of the boot log:',
               file=sys.stderr)
+        
         print(console[-8000:], file=sys.stderr)
         return 1
+    
     print(f'\n{len(matched)} line(s) matched {pattern!r}.')
     return 0
 
 
 def available(key, have_bundle, patched):
+    
     test = TESTS[key]
     if test['bundle'] and not have_bundle:
         return 'needs a kernel bundle'
     if test['patched'] and not patched:
         return 'needs the patched QEMU built by this script'
+    
     return ''
 
 
 def menu(have_bundle, patched):
+    
     print('\n== Lab tests ==')
     for index, key in enumerate(ORDER, 1):
         blocked = available(key, have_bundle, patched)
@@ -493,22 +530,28 @@ def menu(have_bundle, patched):
         for line in wrap(TESTS[key]['blurb']):
             print(f'     {line}')
     print('\n  q) quit\n')
+    
     while True:
         try:
             choice = input(f'Select 1-{len(ORDER)} or q: ').strip().lower()
         except EOFError:
+            
             # No terminal: --test NAME is the non-interactive way in.
             print('\n  no input available; use --test NAME (see --list-tests)')
             return None
+        
         if choice in ('q', 'quit', ''):
             return None
+        
         if choice.isdigit() and 1 <= int(choice) <= len(ORDER):
             key = ORDER[int(choice)-1]
             blocked = available(key, have_bundle, patched)
+            
             if blocked:
                 print(f'  {key} is unavailable: {blocked}')
                 continue
             return key
+        
         print('  not a valid choice')
 
 
@@ -520,8 +563,10 @@ def wrap(text, width=76):
             line = word
         else:
             line = f'{line} {word}'.strip()
+            
     if line:
         out.append(line)
+        
     return out
 
 
@@ -570,12 +615,16 @@ def main():
     p.add_argument('--reconfigure', action='store_true', help='rerun configure in an existing build dir')
     p.add_argument('--dry-run', action='store_true', help='print every command without running it')
     a = p.parse_args()
+    
     if sys.version_info < (3, 11):
         p.error('this lab needs Python 3.11+ (hashlib.file_digest)')
+        
     if not 0 <= a.jobs <= 256:
         p.error('jobs must be 0..256')
+        
     if not 1 <= a.packets <= 1_000_000_000 or not 0 <= a.pps <= 100_000_000:
         p.error('invalid packet count/rate')
+        
     if a.list_tests:
         for key in ORDER:
             print(f'{key:<10} {TESTS[key]["title"]}')
@@ -585,6 +634,7 @@ def main():
         qemu = a.qemu.expanduser().resolve()
         if not os.access(qemu, os.X_OK):
             p.error(f'{qemu} is not executable')
+            
         print(f'== Using the supplied QEMU ==\n  {qemu}')
         accelerators = verify(qemu)
         record = read_provenance(qemu)
@@ -601,14 +651,18 @@ def main():
         src = choose_source(a.qemu_src)
         build = (a.build_dir.expanduser().resolve() if a.build_dir
                  else src/BUILD_NAME.get(platform.system(), 'build-lab'))
+        
         print(f'== QEMU source ==\n  {src}')
         describe = obtain_source(src, a.ref, a.dry_run)
         print('== Patches ==')
+        
         patches = apply_patches(src, a.dry_run)
         print(f'== Build ==\n  {build}')
+        
         configure = build_qemu(src, build, a.jobs, a.reconfigure, a.dry_run)
         qemu = build/BINARY
         print('== Signing ==')
+        
         signed = ensure_signed(qemu, build, src, a.dry_run)
         print('== Verify ==')
         if a.dry_run:
@@ -618,6 +672,7 @@ def main():
             accelerators = verify(qemu)
             patched = QUEUE_RESET in patches
             write_provenance(qemu, src, describe, patches, configure, signed, a.dry_run)
+            
         print(f'\nLab QEMU: {qemu}')
 
     if a.build_only:
@@ -627,16 +682,19 @@ def main():
     dest = a.bundle.expanduser().resolve()
     work = a.work or lab_builders.default_work(a.builder)
     if a.rebuild:
+        
         # The edit/build/boot loop: whatever is on the builder now becomes the bundle.
         build = [sys.executable, str(PROJECT/'scripts/kernel-lab-build.py'),
                  *lab_builders.forward(a), '--work', work, '--output', str(dest), '--force']
         if a.source:
             build += ['--source', a.source]
         run(build, a.dry_run)
+        
     manifest, reason = check_bundle(dest)
     if manifest is None and not a.rebuild and not a.no_export:
         builder = None if (a.builder == 'multipass' and not a.instance) else lab_builders.from_args(a)
         remote = builder_bundle(builder, work)
+        
         if remote:
             print(f'\nNo usable bundle at {dest}: {reason}')
             print(f'{builder.describe()} has a finished one:\n  {remote}')
@@ -646,6 +704,7 @@ def main():
                      *lab_builders.forward(a), '--work', work, '--export-only',
                      '--output', str(dest)] + (['--force'] if dest.exists() else []), a.dry_run)
                 manifest, reason = check_bundle(dest)
+                
     if manifest is None:
         bundle_next_steps(a.bundle, reason)
         if TESTS[a.test]['bundle'] if a.test else False:
@@ -665,6 +724,7 @@ def main():
         print('This bundle predates the Wi-Fi userspace. Rebuild with --rebuild --test wifi.',
               file=sys.stderr)
         return 1
+    
     blocked = available(key, manifest is not None, patched)
     if blocked:
         # Only reachable through --test: the menu never hands back a blocked key.
@@ -678,20 +738,25 @@ def main():
     print(f'\n== {test["title"]} ==')
     for line in wrap('Results: ' + test['results']):
         print('  ' + line)
+        
     for line in wrap('Look for: ' + test['watch']):
         print('  ' + line)
+        
     if key == 'debug':
         print(f'\n  Second terminal:\n    python3 {PROJECT/"scripts/debug-kernel-lab.py"} '
               f'--bundle {a.bundle} --debugger lldb')
+        
     if test['boots']:
         print(f'  Accelerator: {accel}' + ('  (TCG is correctness only, not a rate measurement)'
                                            if accel == 'tcg' else ''))
     if test['backend']:
         ensure_backend(a.dry_run)
     print()
+    
     steps = steps_for(key, a.bundle, qemu, accel, a.packets, a.pps, a.timeout)
     if key == 'boot':
         return run_boot(steps[0], a.grep, a.dry_run)
+    
     for step in steps:
         try:
             run(step, a.dry_run)
@@ -699,6 +764,7 @@ def main():
             print(f'\nStep failed with exit status {e.returncode}. '
                   'The run directory printed above holds the logs.', file=sys.stderr)
             return e.returncode
+        
     return 0
 
 

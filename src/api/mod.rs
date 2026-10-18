@@ -4,16 +4,15 @@
 //! device. Queues are bounded; `WouldBlock` means retry after polling. This is
 //! best-effort UDP, not reliable streams. Wrap AF_XDP in [`crate::net::EthernetIpv4`]
 //! before passing it to this L3 API. Polling also advances adapter timers.
+use alloc::vec::Vec;
 pub mod tcp;
 pub mod udp;
 use crate::device::{Device, PacketBuf};
+use crate::platform::io;
+use crate::platform::net::SocketAddrV4;
 use crate::transport::udp::{build_ipv4, parse_ipv4, Datagram};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    io,
-    net::SocketAddrV4,
-    time::Duration,
-};
+use alloc::collections::{BTreeMap, VecDeque};
+use core::time::Duration;
 pub use tcp::{ConnectionId, TcpConfig, TcpPool, TcpState};
 pub use udp::{DatagramId, SendOptions, UdpConfig, UdpEvent, UdpFailure, UdpOutcome};
 use udp::{Queued, Scheduler};
@@ -376,7 +375,7 @@ impl<D: Device> UdpPool<D> {
             // consumes nothing on Err; WouldBlock is ordinary backpressure.
             match self
                 .device
-                .send(std::slice::from_mut(&mut self.tx.queue[i].frame))
+                .send(core::slice::from_mut(&mut self.tx.queue[i].frame))
             {
                 Ok(1) => {
                     self.tx.accepted(peer, bytes, self.now, &self.config);
@@ -436,7 +435,7 @@ impl<D: Device> UdpPool<D> {
         self.flush()?;
         self.device.recv(budget.min(self.capacity), &mut self.rx)?;
         let count = self.rx.len();
-        let mut rx = std::mem::take(&mut self.rx);
+        let mut rx = core::mem::take(&mut self.rx);
         let result = (|| {
             for mut frame in rx.drain(..) {
                 let Ok(datagram) = parse_ipv4(frame.as_slice()) else {
@@ -449,7 +448,7 @@ impl<D: Device> UdpPool<D> {
                 let discovery = datagram.payload.len() == 10 && datagram.payload[..4] == *b"ANSP";
                 if discovery && datagram.payload[..6] == *QUERY {
                     let id = u32::from_be_bytes(datagram.payload[6..10].try_into().unwrap());
-                    let mut services = std::mem::take(&mut self.service_work);
+                    let mut services = core::mem::take(&mut self.service_work);
                     services.clear();
                     services.extend(self.services.iter().map(|(&a, &id)| (a, id)));
                     for &(address, service_id) in &services {
@@ -558,9 +557,9 @@ impl<D: Device> UdpPool<crate::net::EthernetIpv4<D>> {
     /// both layers intact; identical renewal preserves queued traffic and peers.
     pub fn configure_ipv4(
         &mut self,
-        address: std::net::Ipv4Addr,
+        address: crate::platform::net::Ipv4Addr,
         prefix: u8,
-        gateway: Option<std::net::Ipv4Addr>,
+        gateway: Option<crate::platform::net::Ipv4Addr>,
         services: &[Service],
     ) -> io::Result<()> {
         let replacement = self.validate_services(services)?;

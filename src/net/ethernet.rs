@@ -1,6 +1,6 @@
 //! Untagged Ethernet II headers. VLAN dispatch remains in the original responder.
 use crate::device::PacketBuf;
-use std::io;
+use crate::platform::io;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
@@ -83,9 +83,10 @@ pub(super) fn prepend(frame: &mut PacketBuf, source: [u8; 6], destination: [u8; 
         destination,
         source,
         ether_type: kind,
-    }
-    .encode();
-    frame.push_header(&header);
+    }.encode();
+    
+    frame
+        .push_header(&header);
 
     let len = frame.len();
     if len < 60 {

@@ -1,4 +1,5 @@
 mod backend;
+pub mod dma;
 
 // pub (crate) for test access
 pub(crate) mod buffer_pool;
@@ -23,68 +24,15 @@ pub use backend::af_xdp::{
 #[cfg(all(feature = "tun", any(target_os = "linux", target_os = "macos")))]
 pub use backend::DefaultDevice;
 pub use backend::Error;
-pub use buffer_pool::PacketBuf;
+pub use buffer_pool::{PacketBuf, PacketPool};
 pub use loopback::LoopbackDevice;
 
 #[cfg(all(feature = "tun", target_os = "macos"))]
 pub use tun_reactor::UtunReactor;
 
-/// A network device backend (TUN, AF_XDP, …).
-///
-/// Implementations are single-core by design and are therefore `!Send` /
-/// `!Sync`. The shared frame pool uses interior mutability so the hot-path
-/// methods can be expressed against `&self`; the device wrapper only needs
-/// `&mut self` to hand out exclusive [`PacketBuf`] handles.
-pub trait Device {
-    /// Advance protocol adapters with application-owned monotonic time. Raw
-    /// backends have no protocol timers. Call even while idle; recv still drives RX.
-    fn poll_at(&mut self, _now: std::time::Duration) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    /// Adapter timer hint; raw devices normally have no protocol deadlines.
-    fn next_deadline(&self) -> Option<std::time::Duration> {
-        None
-    }
-
-    /// Clear/recycle the previous `out`, then receive up to `max` frames.
-    /// The device populates `out` with [`PacketBuf`]s
-    /// backed by the device's own pool. For zero-copy backends, these may be
-    /// frames the kernel already filled; for TUN, they are freshly allocated.
-    fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> std::io::Result<usize>;
-
-    /// Submit an accepted prefix of frames, without waiting for queue space.
-    /// `Ok(n)` replaces `frames[..n]` with valid empty buffers; the suffix
-    /// remains owned by the caller and can be retried. `Err` consumes nothing.
-    /// Asynchronous backends report acceptance, not wire delivery; completion
-    /// errors are exposed by their progress/stats API.
-    fn send(&mut self, frames: &mut [PacketBuf]) -> std::io::Result<usize>;
-
-    /// Allocate an empty frame for TX. Returns `None` if the pool is exhausted.
-    fn alloc(&mut self) -> Option<PacketBuf>;
-
-    /// Allocate up to `max` TX frames, appending to `out`.
-    fn alloc_batch(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
-        let start = out.len();
-        for _ in 0..max {
-            let Some(buf) = self.alloc() else {
-                break;
-            };
-            out.push(buf);
-        }
-        out.len() - start
-    }
-
-    /// Maximum frame capacity (including headroom).
-    fn frame_size(&self) -> usize;
-}
-
-/// Consume a submitted prefix, leaving safe empty slots.
-pub(crate) fn recycle_frames(frames: &mut [PacketBuf]) {
-    for frame in frames {
-        drop(std::mem::take(frame));
-    }
-}
+mod contract;
+pub(crate) use contract::recycle_frames;
+pub use contract::Device;
 
 #[cfg(all(feature = "io_uring", target_os = "linux"))]
 pub use backend::uring::{UringConfig, UringStats, UringTunDevice};

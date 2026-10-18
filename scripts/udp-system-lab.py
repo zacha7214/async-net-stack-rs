@@ -46,6 +46,7 @@ def main():
     def owned():
         if not (state / 'owner.json').is_file():
             raise SystemExit('lab has no ownership marker; run up first')
+
         if json.loads((state / 'owner.json').read_text()) != ns:
             raise SystemExit('lab ownership mismatch')
 
@@ -54,6 +55,7 @@ def main():
         opts = profiles[name]
         if not isinstance(opts, list) or not all(isinstance(x, str) for x in opts):
             raise ValueError('profile must be a list of tc arguments')
+
         for dev, selected in [('s0', 'request'), ('c0', 'reply')]:
             if direction in ['both', selected]:
                 execute('router', 'tc', 'qdisc', 'replace', 'dev', dev, 'root', 'netem', *opts)
@@ -63,6 +65,7 @@ def main():
         if state.exists() or any(n in existing for n in ns.values()):
             raise SystemExit('lab already exists or names collide; inspect status/down')
         state.mkdir(parents=True, mode=0o700)
+
         created = []
         try:
             for name in ns.values():
@@ -71,6 +74,7 @@ def main():
             (state / 'owner.json').write_text(json.dumps(ns))
             for role in ns:
                 ip(role, 'link', 'set', 'lo', 'up')
+
             for role, peer, subnet in [('client', 'c0', '1'), ('server', 's0', '2')]:
                 ip('router', 'link', 'add', peer, 'type', 'veth', 'peer', 'name', 'eth0', 'netns', ns[role])
                 ip('router', 'addr', 'add', f'10.80.{subnet}.1/24', 'dev', peer)
@@ -78,8 +82,10 @@ def main():
                 ip(role, 'addr', 'add', f'10.80.{subnet}.2/24', 'dev', 'eth0')
                 ip(role, 'link', 'set', 'eth0', 'up')
                 ip(role, 'route', 'add', 'default', 'via', f'10.80.{subnet}.1')
+
             for role in ['router', 'server']:
                 execute(role, 'sysctl', '-qw', 'net.ipv4.ip_forward=1')
+
             ip('router', 'route', 'add', '10.77.0.0/24', 'via', '10.80.2.2')
             execute('server', 'ip', 'tuntap', 'add', 'dev', 'labtun', 'mode', 'tun')
             ip('server', 'addr', 'add', '10.77.0.1/24', 'dev', 'labtun')
@@ -94,6 +100,7 @@ def main():
             raise
         print(json.dumps(dict(namespaces=ns, target='10.77.0.2:9000', profile=a.profile)))
         return
+
     owned()
     if a.command == 'down':
         # Never silently orphan processes or kill unknown namespace users.
@@ -149,20 +156,24 @@ def main():
             for repeat in range(a.repeats):
                 for scenario in ['clean', 'lossy', 'bufferbloat', 'burst-loss']:
                     profile(scenario)
+
                     # Drain prior qdisc traffic after replacement. Rotate order to
                     # reduce always-running-the-burst-first bias.
                     time.sleep(1)
                     for policy in (['burst', 'paced'] if repeat % 2 == 0 else ['paced', 'burst']):
                         result = execute('client', sys.executable, ROOT / 'scripts/udp-policy-probe.py',
                                          '--policy', policy, capture=True)
+
                         rows.append(dict(repeat=repeat, profile=scenario, **json.loads(result.stdout)))
                         metadata['snapshots'].append(dict(repeat=repeat, profile=scenario, policy=policy,
                             qdisc=execute('router', 'tc', '-s', 'qdisc', 'show', capture=True).stdout))
+
                         a.output.with_suffix('.environment.json').write_text(json.dumps(metadata, indent=2))
                         a.output.write_text(json.dumps(rows, indent=2))
                         time.sleep(1)
         finally:
             profile(a.profile)
+
         run(sys.executable, ROOT / 'scripts/udp-policy-probe.py', '--report', a.output)
 
 

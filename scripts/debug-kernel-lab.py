@@ -20,6 +20,7 @@ def commands(bundle, port, debugger):
     if header[56:60] != b'ARM\x64': raise ValueError('not an ARM64 Image')
     offset, size = struct.unpack_from('<QQ', header, 8)
     if not size: raise ValueError('requires a modern ARM64 Image header')
+    
     # Matches QEMU hw/arm/boot.c for -machine virt and a raw -kernel Image.
     physical = 0x40000000 + offset + (0x200000 if offset < 4096 else 0)
     delta = physical-symbols['_text']
@@ -27,6 +28,7 @@ def commands(bundle, port, debugger):
     virtual = symbols['__primary_switched']
     image = str(bundle/'vmlinux')
     if '"' in image or '\n' in image: raise ValueError('unsupported quote/newline in bundle path')
+    
     if debugger == 'lldb':
         slide = delta & ((1 << 64)-1)
         lines = [f'target create "{image}"', 'settings set target.skip-prologue false',
@@ -46,6 +48,7 @@ def commands(bundle, port, debugger):
                  f'thbreak *{entry:#x}', 'continue', 'info registers pc x0 x1 x2 x3', 'x/8i $pc']
         transition = [f'symbol-file "{image}"', f'thbreak *{virtual:#x}', 'continue',
                       'hbreak start_kernel', 'hbreak setup_arch']
+        
     return '\n'.join(lines)+'\n', '\n'.join(transition)+'\n'
 
 
@@ -56,19 +59,25 @@ def main():
     p.add_argument('--debugger', choices=['lldb', 'gdb'], default='lldb')
     p.add_argument('--emit-only', action='store_true')
     a = p.parse_args()
+    
     if not 1024 <= a.port <= 65535: p.error('invalid port')
     start, transition = commands(a.bundle.resolve(), a.port, a.debugger)
     directory = Path(tempfile.mkdtemp(prefix='kernel-debug-', dir='/tmp'))
+    
     init, mmu = directory/'entry.commands', directory/'virtual.commands'
     init.write_text(start); mmu.write_text(transition)
+    
     verb = 'command source' if a.debugger == 'lldb' else 'source'
     print(f'Entry commands: {init}\nAt primary_entry, use si to step early assembly.\n'
           f'To continue to __primary_switched with virtual symbols:\n  {verb} {mmu}', flush=True)
+    
     if a.emit_only:
         print(start); print(transition); return
+    
     binary = shutil.which(a.debugger)
     if not binary: p.error(f'{a.debugger} not installed; use --emit-only or install it')
     args = [binary, '--no-lldbinit', '-s', str(init)] if a.debugger == 'lldb' else [binary, '-nx', '-x', str(init)]
+    
     raise SystemExit(subprocess.call(args))
 
 

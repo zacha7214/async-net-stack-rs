@@ -12,6 +12,8 @@
 //! simultaneous open, urgent data, PMTU adaptation, and fast retransmit/recovery
 //! are absent; loss recovery currently uses the retransmission timer. This is a
 //! lab implementation, not RFC-complete TCP.
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 mod connection;
 
 use crate::{
@@ -19,16 +21,15 @@ use crate::{
     transport::tcp::{self, Segment, ACK, FIN, RST, SYN, URG},
 };
 
+use crate::platform::io;
+use crate::platform::net::SocketAddrV4;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use connection::Connection;
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    io::{self, Read},
-    net::SocketAddrV4,
-    time::Duration,
-};
+use core::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(u64);
+
 impl ConnectionId {
     /// Stable within a pool; combine with telemetry session ID across restarts.
     pub fn as_u64(self) -> u64 {
@@ -242,8 +243,10 @@ pub struct TcpPool<D> {
 }
 
 impl<D: Device> TcpPool<D> {
+    /// Use host entropy. Portable builds return `Unsupported`; use
+    /// `with_sequence_source` with platform entropy or a simulation source.
     pub fn new(device: D, config: TcpConfig) -> io::Result<Self> {
-        Self::with_sequence_source(device, config, initial_sequence)
+        Self::with_sequence_source(device, config, crate::platform::default_sequence_source()?)
     }
 
     /// Supply initial sequence numbers for reproducible simulations or platform
@@ -514,17 +517,24 @@ impl<D: Device> TcpPool<D> {
         if now < self.now {
             return Err(invalid("time went backwards"));
         }
+        
         self.now = now;
         for c in self.connections.values_mut() {
             c.tick(now, &self.config);
         }
+        
         self.report_states();
         self.connections
-            .retain(|_, c| c.accepted || !c.state.is_terminal());
+            .retain(
+                |_, c| c.accepted || !c.state.is_terminal()
+            );
+        
         self.device.poll_at(now)?;
         self.device.recv(budget, &mut self.rx)?;
-        let mut rx = std::mem::take(&mut self.rx);
+        
+        let mut rx = core::mem::take(&mut self.rx);
         let count = rx.len();
+        
         // Restore/recycle scratch packets even if accepting a SYN cannot obtain entropy.
         let result = (|| {
             for frame in rx.drain(..) {
@@ -533,6 +543,7 @@ impl<D: Device> TcpPool<D> {
                     self.stats.ignored += 1;
                     continue;
                 }
+                
                 match tcp::parse_ipv4(bytes) {
                     Ok(segment) => {
                         self.stats.received += 1;
@@ -541,12 +552,15 @@ impl<D: Device> TcpPool<D> {
                     Err(_) => self.stats.malformed += 1,
                 }
             }
+            
             Ok::<(), io::Error>(())
+            
         })();
 
         rx.clear();
         self.rx = rx;
         result?;
+        
         self.flush_reset()?;
         for connection in self.connections.values_mut() {
             for _ in 0..self.config.tx_burst {
@@ -658,7 +672,8 @@ impl<D: Device> TcpPool<D> {
                 id,
                 Connection::passive(segment, sequence, self.now, &self.config),
             );
-        } else {
+        } 
+        else {
             self.queue_reset(if segment.flags & ACK != 0 {
                 Reset {
                     local: segment.destination,
@@ -667,7 +682,8 @@ impl<D: Device> TcpPool<D> {
                     acknowledgment: 0,
                     flags: RST,
                 }
-            } else {
+            } 
+            else {
                 Reset {
                     local: segment.destination,
                     remote: segment.source,
@@ -684,7 +700,8 @@ impl<D: Device> TcpPool<D> {
     fn queue_reset(&mut self, reset: Reset) {
         if self.resets.len() == self.config.control_capacity {
             self.stats.control_drops += 1;
-        } else {
+        } 
+        else {
             self.resets.push_back(reset);
         }
     }
@@ -712,7 +729,7 @@ impl<D: Device> TcpPool<D> {
             },
         )?;
 
-        let n = match self.device.send(std::slice::from_mut(&mut frame)) {
+        let n = match self.device.send(core::slice::from_mut(&mut frame)) {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
             Err(e)
                 if matches!(
@@ -741,13 +758,6 @@ impl<D: Device> TcpPool<D> {
     }
 }
 
-fn initial_sequence() -> io::Result<u32> {
-    let mut bytes = [0; 4];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-
-    Ok(u32::from_ne_bytes(bytes))
-}
-
 fn validate_address(address: SocketAddrV4) -> io::Result<()> {
     if address.port() == 0
         || address.ip().is_unspecified()
@@ -755,7 +765,8 @@ fn validate_address(address: SocketAddrV4) -> io::Result<()> {
         || address.ip().is_multicast()
     {
         Err(invalid("TCP needs a unicast IP and nonzero port"))
-    } else {
+    } 
+    else {
         Ok(())
     }
 }

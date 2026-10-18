@@ -5,14 +5,13 @@ use super::{
     neighbor::NeighborState,
     route::{self, Route, RouteTable},
 };
+use alloc::vec::Vec;
 
 use crate::device::{Device, PacketBuf};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    io,
-    net::Ipv4Addr,
-    time::Duration,
-};
+use crate::platform::io;
+use crate::platform::net::Ipv4Addr;
+use alloc::collections::{BTreeMap, VecDeque};
+use core::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct InterfaceConfig {
@@ -390,7 +389,7 @@ impl<D: Device> EthernetIpv4<D> {
 
         self.now = now;
         self.ensure_spare();
-        let mut work = std::mem::take(&mut self.neighbor_work);
+        let mut work = core::mem::take(&mut self.neighbor_work);
         work.clear();
         work.extend(self.neighbors.iter().map(|(&ip, &state)| (ip, state)));
         for &(ip, state) in &work {
@@ -743,7 +742,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
 
         // Receive before flushing: an ARP reply must still be processed when TX is full.
         self.device.recv(max, &mut self.rx)?;
-        let mut rx = std::mem::take(&mut self.rx);
+        let mut rx = core::mem::take(&mut self.rx);
         for frame in rx.drain(..) {
             self.receive_frame(frame, out);
         }
@@ -810,7 +809,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
                 Ipv4Addr::from(<[u8; 4]>::try_from(&slot.as_slice()[16..20]).unwrap());
 
             if self.broadcast(destination) {
-                let mut frame = std::mem::take(slot);
+                let mut frame = core::mem::take(slot);
                 eth::prepend(&mut frame, self.config.mac, eth::BROADCAST, eth::IPV4);
                 self.ready.push_back(frame);
             } else {
@@ -853,7 +852,7 @@ impl<D: Device> Device for EthernetIpv4<D> {
                     route,
                 });
 
-                let mut frame = std::mem::take(slot);
+                let mut frame = core::mem::take(slot);
                 if let Some(mac) = mac {
                     eth::prepend(&mut frame, self.config.mac, mac, eth::IPV4);
                     self.ready.push_back(frame);
@@ -916,7 +915,8 @@ fn flush_front<D: Device>(device: &mut D, queue: &mut VecDeque<PacketBuf>) -> io
         result => result?,
     };
 
-    queue.drain(..accepted);
+    queue
+        .drain(..accepted);
     Ok(accepted)
 }
 

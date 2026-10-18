@@ -21,6 +21,7 @@ pub enum XdpMode {
 pub struct XdpConfig {
     pub frames: usize,
     pub chunk_size: usize,
+    
     /// Additional UMEM headroom; RX always honors the descriptor's offset,
     /// which can also include the kernel's XDP_PACKET_HEADROOM.
     pub headroom: usize,
@@ -29,12 +30,15 @@ pub struct XdpConfig {
     pub rx_entries: usize,
     pub tx_entries: usize,
     pub attach: bool,
+    
     /// Force generic/skb XDP. Auto binds in copy mode when this is selected.
     pub attach_generic: bool,
     pub max_queues: u32,
     pub mode: XdpMode,
+    
     /// Maximum packets per recv/send/progress operation (1..=4096).
     pub batch_size: usize,
+    
     /// Free frames withheld from RX refill so TX allocation can make progress.
     pub tx_reserve: usize,
 }
@@ -57,6 +61,7 @@ impl Default for XdpConfig {
         }
     }
 }
+
 impl XdpConfig {
     pub fn validate(&self, queue: u32) -> io::Result<()> {
         for entries in [
@@ -67,6 +72,7 @@ impl XdpConfig {
         ] {
             validate_ring_size(entries)?;
         }
+        
         if self.frames < 2
             || self.tx_reserve >= self.frames
             || self.batch_size == 0
@@ -85,6 +91,7 @@ impl XdpConfig {
                 "invalid XDP configuration",
             ));
         }
+        
         Ok(())
     }
 }
@@ -121,10 +128,12 @@ pub struct XdpDevice {
     attach_mode: AttachMode,
     counters: XdpCounters,
 }
+
 impl XdpDevice {
     pub fn new(ifname: &str, queue_id: u32) -> io::Result<Self> {
         Self::with_config(ifname, queue_id, &XdpConfig::default())
     }
+    
     pub fn with_config(ifname: &str, queue_id: u32, cfg: &XdpConfig) -> io::Result<Self> {
         cfg.validate(queue_id)?;
         let name = std::ffi::CString::new(ifname)
@@ -133,6 +142,7 @@ impl XdpDevice {
         if ifindex == 0 {
             return Err(io::Error::last_os_error());
         }
+        
         let umem = UMem::new(
             cfg.frames,
             cfg.chunk_size,
@@ -147,7 +157,8 @@ impl XdpDevice {
         let mut prog = XskProgram::new(ifindex, cfg.max_queues)?;
         let attach_mode = if cfg.attach {
             prog.attach(cfg.attach_generic)?
-        } else {
+        }
+        else {
             AttachMode::None
         };
 
@@ -221,29 +232,37 @@ impl XdpDevice {
     pub fn bind_flags(&self) -> libc::c_ushort {
         self.xsk.bind_flags()
     }
+    
     pub fn need_wakeup_enabled(&self) -> bool {
         self.xsk.need_wakeup_enabled()
     }
+    
     pub fn stats(&self) -> io::Result<XdpStatistics> {
         self.xsk.stats()
     }
+    
     pub fn counters(&self) -> XdpCounters {
         self.counters
     }
+    
     pub fn attach_mode(&self) -> AttachMode {
         self.attach_mode
     }
+    
     pub fn is_zero_copy(&self) -> bool {
         self.bind_flags() & XDP_ZEROCOPY != 0
     }
+    
     pub fn pending_tx(&self) -> usize {
         self.tx_pending
     }
+    
     /// For explicitly attaching this device's program with bpftool when
     /// `attach=false`. A separate redirect program must use this map.
     pub fn map_fd(&self) -> RawFd {
         self.prog.map_fd()
     }
+    
     pub fn program_fd(&self) -> RawFd {
         self.prog.program_fd()
     }
@@ -260,7 +279,9 @@ impl XdpDevice {
 
     fn drain_cq(&mut self) -> usize {
         self.cq_scratch.clear();
-        let n = self.umem.cq_pop(&mut self.cq_scratch, self.cfg.batch_size);
+        let n = self.umem
+            .cq_pop(&mut self.cq_scratch, self.cfg.batch_size);
+        
         let mut valid = 0;
         for &addr in &self.cq_scratch {
             let idx = (addr / self.cfg.chunk_size as u64) as usize;
@@ -268,13 +289,17 @@ impl XdpDevice {
                 self.counters.invalid_descriptors += 1;
                 continue;
             }
+            
             self.state[idx] = FREE;
             self.indices[valid] = idx;
             valid += 1;
         }
-        self.pool.free_n(&self.indices[..valid]);
+        
+        self.pool
+            .free_n(&self.indices[..valid]);
         self.tx_pending -= valid;
         self.counters.tx_completed += valid as u64;
+        
         n
     }
 
@@ -283,23 +308,28 @@ impl XdpDevice {
         // consumer does not tell us which buffers the hardware still owns.
         let mut budget = (self.rx_target - self.rx_owned)
             .min(self.pool.available().saturating_sub(self.cfg.tx_reserve));
+        
         while budget > 0 {
             let limit = budget.min(self.indices.len());
             let n = self.pool.alloc_n(&mut self.indices[..limit]);
             for i in 0..n {
                 self.fill_scratch[i] = (self.indices[i] * self.cfg.chunk_size) as u64;
             }
+            
             let pushed = self.umem.fill_push(&self.fill_scratch[..n]);
             for &idx in &self.indices[..pushed] {
                 self.state[idx] = RX_KERNEL;
             }
+            
             self.pool.free_n(&self.indices[pushed..n]);
             self.rx_owned += pushed;
             budget -= pushed;
+            
             if pushed < limit {
                 break;
             }
         }
+        
         // RX wakeup is poll(), not the TX sendto() kick. Check even when no
         // new entries were published: NEED_WAKEUP can change while idle.
         if !self.xsk.need_wakeup_enabled() || self.umem.fill_needs_wakeup() {
@@ -311,15 +341,18 @@ impl XdpDevice {
     pub(crate) fn debug_umem(&self) -> &UMem {
         &self.umem
     }
+    
     #[cfg(test)]
     pub(crate) fn debug_socket(&self) -> &XskSocket {
         &self.xsk
     }
+    
     #[cfg(test)]
     pub(crate) fn debug_prog_map_fd(&self) -> RawFd {
         self.map_fd()
     }
 }
+
 impl AsRawFd for XdpDevice {
     fn as_raw_fd(&self) -> RawFd {
         self.xsk.fd()
@@ -333,6 +366,7 @@ impl Device for XdpDevice {
         self.rx_scratch.clear();
         self.xsk
             .rx_pop(&mut self.rx_scratch, max.min(self.cfg.batch_size));
+        
         for &(addr, len) in &self.rx_scratch {
             let Some((idx, offset)) = decode_rx(addr, len, self.cfg.chunk_size, self.cfg.frames)
             else {
@@ -347,12 +381,16 @@ impl Device for XdpDevice {
 
             self.rx_owned -= 1;
             self.state[idx] = APP;
-            let mut buf = self.pool.packet_buf(idx, 0);
+            let mut buf = self
+                .pool
+                .packet_buf(idx, 0);
+            
             buf.set_headroom(offset);
             buf.set_len(len as usize);
 
             out.push(buf);
         }
+        
         self.counters.rx_packets += out.len() as u64;
         Ok(out.len())
     }
@@ -360,7 +398,9 @@ impl Device for XdpDevice {
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         self.drain_cq();
         let requested = frames.len().min(self.cfg.batch_size);
-        let n = requested.min(self.xsk.tx_free_slots(requested));
+        let n = requested
+            .min(self.xsk.tx_free_slots(requested));
+        
         if n < requested {
             self.counters.tx_backpressure += 1;
         }

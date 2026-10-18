@@ -1,6 +1,6 @@
 //! Neighbor state for one Ethernet interface. The owning interface bounds the
 //! number of entries and queued packets; static entries never learn from ARP.
-use std::time::Duration;
+use core::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeighborState {

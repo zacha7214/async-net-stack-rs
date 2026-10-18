@@ -46,3 +46,18 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 ethtool
       - run: cargo build --locked --bins
       - run: sudo python3 scripts/capture-bundle-smoke.py
+
+  portable-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-unknown-none-softfloat,riscv64gc-unknown-none-elf
+      - run: cargo test --locked -p async-net-stack-core
+      - run: cargo clippy --locked -p async-net-stack-core --all-targets --all-features -- -D warnings
+      - run: cargo build --locked -p async-net-stack-core --target aarch64-unknown-none-softfloat
+      - run: cargo build --locked -p async-net-stack-core --target riscv64gc-unknown-none-elf
+      - uses: dtolnay/rust-toolchain@1.77.0
+      - run: cargo check --locked -p async-net-stack-core

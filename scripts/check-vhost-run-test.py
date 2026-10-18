@@ -14,12 +14,14 @@ def logs(zero=True):
     host = [dict(event="features", access_platform=True, ring_reset=True),
             dict(event="session_generated", session=42, packets=10000, payload_staging_copies=0),
             dict(event="rx_sample", session=42, sequence=0, frame_gpa="0x40000100")]
+    
     guest = [dict(event="guest_ready", session=42, attach="Driver", zero_copy=zero, address_check=True),
              dict(event="guest_sample", session=42, sequence=0, backend_frame_gpa="0x40000100",
                   umem_frame_gpa="0x40000100" if zero else "0x40001100", same_frame=zero),
              dict(event="guest_result", session=42, ok=True, received=10000, requested=10000,
                   zero_copy=zero, address_check=True, samples=1, physical_matches=int(zero),
                   pending_tx=0, rx_invalid=0, rx_dropped=0)]
+    
     return host, guest
 
 
@@ -46,6 +48,7 @@ class Evidence(unittest.TestCase):
     def test_copy_control_cannot_report_same_address(self):
         host, guest = logs(False)
         guest[1]["umem_frame_gpa"] = guest[1]["backend_frame_gpa"]
+        
         with self.assertRaises(ValueError):
             checker.check(host, guest, "copy")
 

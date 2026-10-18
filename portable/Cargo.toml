@@ -1,0 +1,12 @@
+[package]
+name = "async-net-stack-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+publish = false
+
+# This build deliberately has no dependency on libc, std, or host serialization.
+[features]
+# Recognized for shared-source cfg checks; never enables host backends here.
+xdp = []

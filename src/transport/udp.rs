@@ -1,7 +1,7 @@
 //! IPv4 UDP construction/checksums for the echo and traffic-generator examples.
 use crate::device::PacketBuf;
 use crate::net::{checksum, finish_sum, sum_words};
-use std::io;
+use crate::platform::io;
 
 pub fn ipv4_checksum(source: [u8; 4], destination: [u8; 4], datagram: &[u8]) -> u16 {
     finish_sum(
@@ -117,8 +117,8 @@ mod tests {
 /// by the caller. Options and fragments are intentionally unsupported.
 #[derive(Debug, Clone, Copy)]
 pub struct Datagram<'a> {
-    pub source: std::net::SocketAddrV4,
-    pub destination: std::net::SocketAddrV4,
+    pub source: crate::platform::net::SocketAddrV4,
+    pub destination: crate::platform::net::SocketAddrV4,
     pub payload: &'a [u8],
 }
 
@@ -153,8 +153,11 @@ pub fn parse_ipv4(packet: &[u8]) -> io::Result<Datagram<'_>> {
     }
 
     Ok(Datagram {
-        source: std::net::SocketAddrV4::new(source.into(), u16::from_be_bytes([udp[0], udp[1]])),
-        destination: std::net::SocketAddrV4::new(
+        source: crate::platform::net::SocketAddrV4::new(
+            source.into(),
+            u16::from_be_bytes([udp[0], udp[1]]),
+        ),
+        destination: crate::platform::net::SocketAddrV4::new(
             destination.into(),
             u16::from_be_bytes([udp[2], udp[3]]),
         ),

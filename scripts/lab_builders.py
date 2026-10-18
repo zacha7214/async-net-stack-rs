@@ -21,10 +21,12 @@ KINDS = ('multipass', 'ssh', 'docker', 'local')
 DEFAULT_IMAGE = 'async-net-kernel-lab:24.04-wifi2'
 DEFAULT_VOLUME = 'async-net-kernel-lab-work'
 CONTAINER_SOURCE = '/src'
+
 # A pair of kernel files whose names differ only in case. If they are the same
 # file, the checkout sits on a case-insensitive filesystem and is missing content.
 CASE_PROBE = ('net/netfilter/xt_RATEEST.c', 'net/netfilter/xt_rateest.c')
 CONTAINER_WORK = '/work'
+
 # The lab kernel is ARM64 today. See "Other architectures" in docs/kernel-lab.md
 # for what makes this a derived value rather than a constant.
 TARGET_PLATFORM = 'linux/arm64'

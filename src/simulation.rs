@@ -2,10 +2,23 @@
 //! without copying payloads; limited broadcast fans out with copies. This is
 //! a userspace model, not an emulation of Linux scheduling or socket queues.
 use crate::device::{buffer_pool::FramePool, Device, PacketBuf};
-use std::{cell::RefCell, collections::BTreeMap, io, net::Ipv4Addr, rc::Rc, time::Duration};
+use crate::platform::io;
+use crate::platform::net::Ipv4Addr;
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::time::Duration;
 
+#[path = "simulation/access_point.rs"]
 mod access_point;
+#[path = "simulation/bandwidth.rs"]
+pub mod bandwidth;
+#[path = "simulation/dma.rs"]
+pub mod dma;
 pub use access_point::AccessPoint;
+use bandwidth::{AdmissionError, Serializer};
+pub use bandwidth::{Bandwidth, BandwidthStats};
 
 /// Directed link configuration, changed live to reproduce partitions/healing.
 #[derive(Default, Clone, Copy, Debug)]
@@ -27,6 +40,10 @@ pub struct FabricStats {
     pub queue_drops: u64,
     pub unroutable: u64,
     pub backpressure: u64,
+    /// Accepted packets rejected by a bottleneck byte limit.
+    pub bandwidth_drops: u64,
+    /// Accepted packets whose service/arrival time cannot be represented.
+    pub timing_drops: u64,
     /// In-flight frames purged by disconnect/teardown, plus unicast to offline ports.
     pub disconnected_drops: u64,
 }
@@ -52,11 +69,16 @@ struct State {
     routes: BTreeMap<Ipv4Addr, usize>,
     links: BTreeMap<(usize, usize), (Link, u64)>,
     stats: FabricStats,
+    bottlenecks: Vec<Serializer<(usize, usize)>>,
+    shaping: BTreeMap<(usize, usize), usize>,
 }
 
 impl State {
     fn disconnect(&mut self, id: usize) {
         self.ports[id].online = false;
+        for serializer in &mut self.bottlenecks {
+            serializer.cancel(|&(source, target)| source == id || target == id);
+        }
         for (target, port) in self.ports.iter_mut().enumerate() {
             let before = port.queue.len();
             port.queue.retain(|p| target != id && p.source != id);
@@ -67,7 +89,61 @@ impl State {
 
 #[derive(Clone, Default)]
 pub struct Network(Rc<RefCell<State>>);
+/// A shared FIFO bottleneck belonging to one fabric.
+#[derive(Clone)]
+pub struct Bottleneck {
+    network: Network,
+    id: usize,
+}
+impl Bottleneck {
+    pub fn stats(&self) -> BandwidthStats {
+        self.network.0.borrow().bottlenecks[self.id].stats()
+    }
+}
 impl Network {
+    /// Allocate a FIFO serializer; rate and byte capacity must both be nonzero.
+    pub fn bottleneck(&self, config: Bandwidth) -> io::Result<Bottleneck> {
+        let serializer = Serializer::new(config).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bandwidth and byte capacity must be nonzero",
+            )
+        })?;
+        let mut state = self.0.borrow_mut();
+        let id = state.bottlenecks.len();
+        state.bottlenecks.push(serializer);
+        Ok(Bottleneck {
+            network: self.clone(),
+            id,
+        })
+    }
+
+    /// Attach or detach a directed link. Already accepted packets retain deadlines.
+    /// Attach the same handle to several links to model a shared bottleneck.
+    pub fn set_bottleneck(
+        &self,
+        from: &SimDevice,
+        to: &SimDevice,
+        bottleneck: Option<&Bottleneck>,
+    ) -> io::Result<()> {
+        if !Rc::ptr_eq(&self.0, &from.network.0)
+            || !Rc::ptr_eq(&self.0, &to.network.0)
+            || bottleneck.is_some_and(|b| !Rc::ptr_eq(&self.0, &b.network.0))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "foreign fabric handle",
+            ));
+        }
+        let mut state = self.0.borrow_mut();
+        if let Some(b) = bottleneck {
+            state.shaping.insert((from.id, to.id), b.id);
+        } else {
+            state.shaping.remove(&(from.id, to.id));
+        }
+        Ok(())
+    }
+
     /// Create a pool-backed port with one or more virtual host addresses.
     /// Queue capacity counts both ready and delayed frames.
     pub fn port(
@@ -138,6 +214,10 @@ impl Network {
             .checked_add(elapsed)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "clock overflow"))?;
 
+        let now = state.now;
+        for serializer in &mut state.bottlenecks {
+            serializer.advance(now);
+        }
         Ok(())
     }
 
@@ -175,6 +255,14 @@ impl Drop for SimDevice {
 }
 
 impl Device for SimDevice {
+    fn next_deadline(&self) -> Option<Duration> {
+        self.network.0.borrow().ports[self.id]
+            .queue
+            .iter()
+            .map(|p| p.at)
+            .min()
+    }
+
     fn alloc(&mut self) -> Option<PacketBuf> {
         let state = self.network.0.borrow();
         let pool = &state.ports[self.id].pool;
@@ -244,15 +332,18 @@ impl Device for SimDevice {
 
             if !broadcast && route.is_some_and(|id| !state.ports[id].online) {
                 state.stats.disconnected_drops += 1;
-                drop(std::mem::take(frame));
+                drop(core::mem::take(frame));
                 accepted += 1;
                 continue;
             }
 
-            // Congestion is checked before faults; retries do not advance the
-            // fault sequence. Broadcast drops copies instead of partial retry.
+            // Unshaped backpressure precedes faults so retries do not advance
+            // the loss sequence. Shaped links and broadcasts drop instead.
             if !broadcast
-                && route.is_some_and(|id| state.ports[id].queue.len() == state.ports[id].capacity)
+                && route.is_some_and(|id| {
+                    !state.shaping.contains_key(&(self.id, id))
+                        && state.ports[id].queue.len() == state.ports[id].capacity
+                })
             {
                 state.stats.backpressure += 1;
                 break;
@@ -278,20 +369,37 @@ impl Device for SimDevice {
                     continue;
                 }
 
-                let delay = link.delay.saturating_add(if sequence % 2 == 0 {
+                if state.ports[target].queue.len() == state.ports[target].capacity {
+                    state.stats.queue_drops += 1;
+                    continue;
+                }
+                let Some(delay) = link.delay.checked_add(if sequence % 2 == 0 {
                     link.alternating_delay
                 } else {
                     Duration::ZERO
-                });
-
-                let at = state.now.saturating_add(delay);
-                if broadcast {
-                    let port = &mut state.ports[target];
-                    if port.queue.len() == port.capacity {
-                        state.stats.queue_drops += 1;
+                }) else {
+                    state.stats.timing_drops += 1;
+                    continue;
+                };
+                let now = state.now;
+                let arrival = if let Some(id) = state.shaping.get(&(self.id, target)).copied() {
+                    state.bottlenecks[id].admit(now, packet.len(), delay, (self.id, target))
+                } else {
+                    now.checked_add(delay).ok_or(AdmissionError::Overflow)
+                };
+                let at = match arrival {
+                    Ok(at) => at,
+                    Err(AdmissionError::Full) => {
+                        state.stats.bandwidth_drops += 1;
                         continue;
                     }
-
+                    Err(AdmissionError::Overflow) => {
+                        state.stats.timing_drops += 1;
+                        continue;
+                    }
+                };
+                if broadcast {
+                    let port = &mut state.ports[target];
                     let Some(index) = port.pool.alloc() else {
                         state.stats.queue_drops += 1;
                         continue;
@@ -315,11 +423,11 @@ impl Device for SimDevice {
                 state.ports[target].queue.push(Pending {
                     at,
                     source: self.id,
-                    frame: std::mem::take(frame),
+                    frame: core::mem::take(frame),
                 });
             }
 
-            drop(std::mem::take(frame));
+            drop(core::mem::take(frame));
             accepted += 1;
         }
 

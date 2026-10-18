@@ -52,3 +52,7 @@ required-features = ["tun"]
 [[example]]
 name = "xdp_vm_rx"
 required-features = ["xdp"]
+
+[workspace]
+members = ["portable"]
+resolver = "2"

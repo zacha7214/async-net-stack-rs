@@ -6,10 +6,11 @@ use async_net_stack_rs::{
         Action, Service, UdpPool,
     },
     coordinator::{Coordinator, PortConfig, ProtocolPort},
-    simulation::{Link, Network, SimDevice},
+    simulation::{Bandwidth, Link, Network, SimDevice},
 };
 
-use std::{io, net::SocketAddrV4, time::Duration};
+use async_net_stack_rs::platform::io;
+use std::{net::SocketAddrV4, time::Duration};
 
 struct Endpoint {
     coordinator: Coordinator<SimDevice>,
@@ -58,14 +59,34 @@ fn run() -> io::Result<()> {
     let server_addr: SocketAddrV4 = "10.0.0.2:9000".parse().unwrap();
     let mut client = Endpoint::new(&net, client_addr)?;
     let mut server = Endpoint::new(&net, server_addr)?;
+    // Independent full-duplex service; UDP and TCP share each direction.
+    for reverse in [false, true] {
+        let bandwidth = net.bottleneck(Bandwidth {
+            bits_per_second: 1_000_000,
+            queue_bytes: 4096,
+            overhead_bytes: 0,
+        })?;
+        client.coordinator.with_device(|a| {
+            server.coordinator.with_device(|b| {
+                if reverse {
+                    net.set_bottleneck(b, a, Some(&bandwidth))
+                } else {
+                    net.set_bottleneck(a, b, Some(&bandwidth))
+                }
+            })
+        })?;
+    }
+
     client.udp.bind(Service {
         address: client_addr,
         id: 0,
     })?;
+
     server.udp.bind(Service {
         address: server_addr,
         id: 7,
     })?;
+    
     server.tcp.listen(server_addr)?;
 
     client.udp.discover(client_addr, server_addr, 7)?;

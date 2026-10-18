@@ -68,6 +68,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-net-stack-core"
+version = "0.1.0"
+
+[[package]]
 name = "async-net-stack-rs"
 version = "0.1.0"
 dependencies = [

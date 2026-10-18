@@ -1,11 +1,15 @@
 //! Bounded sliding-window TCP state machine. Payload is retained separately from
 //! device buffers: a lost packet must not pin a scarce AF_XDP RX/UMEM frame.
 use super::{blocked, invalid, ConnectionStatus, FlowStatus, Reset, TcpConfig, TcpState, TcpWait};
+use crate::platform::io;
+use crate::platform::net::SocketAddrV4;
 use crate::{
     device::Device,
     transport::tcp::{self, before, Segment, ACK, FIN, PSH, RST, SYN},
 };
-use std::{collections::VecDeque, io, net::SocketAddrV4, time::Duration};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+use core::time::Duration;
 
 struct Flight {
     sequence: u32,
@@ -849,7 +853,7 @@ impl Connection {
             },
         )?;
 
-        let n = match device.send(std::slice::from_mut(&mut frame)) {
+        let n = match device.send(core::slice::from_mut(&mut frame)) {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
             result => result?,
         };

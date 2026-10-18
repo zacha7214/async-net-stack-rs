@@ -12,12 +12,14 @@ ulimit -l unlimited
 echo "KERNEL_LAB_READY $(uname -r)"
 mode=shell
 packets=10000
+
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
         lab.mode=*) mode=${arg#lab.mode=} ;;
         lab.packets=*) packets=${arg#lab.packets=} ;;
     esac
 done
+
 case "$packets" in ''|*[!0-9]*) echo 'Invalid lab.packets'; mode=shell ;; esac
 lab_iface=
 for address in /sys/class/net/*/address; do
@@ -25,10 +27,12 @@ for address in /sys/class/net/*/address; do
         lab_iface=$(basename "$(dirname "$address")")
     fi
 done
+
 if [ -n "$lab_iface" ]; then
     ip link set "$lab_iface" mtu 1500 up
     echo "Lab NIC: $lab_iface"
 fi
+
 case "$mode" in
     wifi)
         wifi-lab --guest-auto
@@ -57,4 +61,5 @@ case "$mode" in
         ;;
     *) echo "Unknown lab.mode: $mode" ;;
 esac
+
 while :; do setsid cttyhack sh; done

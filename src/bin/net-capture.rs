@@ -3,12 +3,14 @@
 mod support;
 use async_net_stack_rs::trace::bundle;
 use std::{path::PathBuf, time::Duration};
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("net-capture: {error}");
         std::process::exit(1);
     }
 }
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut interface = None;

@@ -1,8 +1,10 @@
+extern crate alloc;
 pub mod api;
 pub mod coordinator;
 pub mod device;
 pub mod dns;
 pub mod net;
+pub mod platform;
 pub mod simulation;
 pub mod telemetry;
 pub mod trace;

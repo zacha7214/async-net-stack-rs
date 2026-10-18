@@ -75,7 +75,9 @@ impl Mmap {
 impl Drop for Mmap {
     fn drop(&mut self) {
         // SAFETY: `ptr`/`len` came from a successful mmap in the constructors.
-        unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.len) };
+        unsafe {
+            libc::munmap(self.ptr.as_ptr().cast(), self.len)
+        };
     }
 }
 
@@ -89,6 +91,7 @@ pub(crate) struct Ring {
     _map: Mmap,
     producer: *mut u32,
     consumer: *mut u32,
+
     /// `null` on kernels that do not report a flags offset.
     pub(crate) flags: *mut u32,
     desc: *mut u8,
@@ -187,13 +190,18 @@ impl Ring {
     pub(crate) fn write_desc64(&self, i: u32, v: u64) {
         debug_assert_eq!(self.desc_size, 8);
         // SAFETY: desc array bounds; published by the producer release.
-        unsafe { *self.desc.add(self.index(i) * 8).cast::<u64>() = v };
+        unsafe { *self.desc
+            .add(
+                self.index(i) * 8
+            ).cast::<u64>() = v
+        };
     }
 
     /// Read an `xdp_desc` (RX/TX rings).
     #[inline]
     pub(crate) fn desc16(&self, i: u32) -> (u64, u32) {
         debug_assert_eq!(self.desc_size, 16);
+
         // SAFETY: desc array bounds; happens-after the producer acquire.
         let d = unsafe { &*self.desc.add(self.index(i) * 16).cast::<XdpDesc>() };
         (d.addr, d.len)
@@ -203,9 +211,13 @@ impl Ring {
     #[inline]
     pub(crate) fn write_desc16(&self, i: u32, addr: u64, len: u32) {
         debug_assert_eq!(self.desc_size, 16);
+
         // SAFETY: desc array bounds; published by the producer release.
         unsafe {
-            *self.desc.add(self.index(i) * 16).cast::<XdpDesc>() = XdpDesc {
+            *self.desc
+                .add(self.index(i) * 16)
+                .cast::<XdpDesc>()
+                = XdpDesc {
                 addr,
                 len,
                 options: 0,
@@ -218,6 +230,7 @@ impl Ring {
 pub struct UMem {
     /// Held for its lifetime: closing this fd tears the UMEM down.
     pub(crate) _fd: Rc<OwnedFd>,
+
     /// The frame arena (externally owned by this struct; the `FramePool`
     /// wraps it without owning it).
     map: Rc<Mmap>,
@@ -225,9 +238,11 @@ pub struct UMem {
     cq: Ring,
     chunk_size: usize,
     num_frames: usize,
+
     /// Our own fill-ring producer (we are the producer).
     cached_fill_producer: u32,
     cached_fill_consumer: u32,
+
     /// Our own completion-ring consumer (we are the consumer).
     cached_cq_consumer: u32,
 }
@@ -263,17 +278,26 @@ impl UMem {
             ));
         }
 
-        let fd = unsafe { libc::socket(AF_XDP, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
+        let fd = unsafe {
+            libc::socket(
+                AF_XDP,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                0
+            )
+        };
+
         if fd < 0 {
             return Err(io::Error::last_os_error())
                 .map_err(|e| io::Error::other(format!("AF_XDP socket: {e}")));
         }
+
         // SAFETY: `fd >= 0` and freshly created.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         let total = num_frames
             .checked_mul(chunk_size)
             .ok_or_else(|| io::Error::other("UMEM size overflow"))?;
+
         let map = Mmap::anonymous(total)
             .map_err(|e| io::Error::other(format!("UMEM arena mmap: {e}")))?;
 
@@ -285,24 +309,36 @@ impl UMem {
             flags,
             tx_metadata_len: 0,
         };
+
         set_sockopt(fd.as_raw_fd(), XDP_UMEM_REG, &reg)
-            .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_REG: {e}")))?;
+            .map_err(
+                |e| io::Error::other(format!("setsockopt XDP_UMEM_REG: {e}"))
+            )?;
+
         set_sockopt(
             fd.as_raw_fd(),
             XDP_UMEM_FILL_RING,
             &(fill_entries as libc::c_int),
         )
-        .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_FILL_RING: {e}")))?;
+        .map_err(
+            |e| io::Error::other(format!("setsockopt XDP_UMEM_FILL_RING: {e}"))
+        )?;
+
         set_sockopt(
             fd.as_raw_fd(),
             XDP_UMEM_COMPLETION_RING,
             &(cq_entries as libc::c_int),
         )
-        .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_COMPLETION_RING: {e}")))?;
+        .map_err(
+            |e| io::Error::other(format!("setsockopt XDP_UMEM_COMPLETION_RING: {e}"))
+        )?;
 
         let mut offs = XdpMmapOffsets::default();
         get_sockopt(fd.as_raw_fd(), XDP_MMAP_OFFSETS, &mut offs)
-            .map_err(|e| io::Error::other(format!("getsockopt XDP_MMAP_OFFSETS: {e}")))?;
+            .map_err(
+                |e| io::Error::other(format!("getsockopt XDP_MMAP_OFFSETS: {e}"))
+            )?;
+
         let fq = Ring::new(
             fd.as_raw_fd(),
             &offs.fr,
@@ -310,7 +346,10 @@ impl UMem {
             fill_entries,
             8,
         )
-        .map_err(|e| io::Error::other(format!("fill ring mmap: {e}")))?;
+        .map_err(
+            |e| io::Error::other(format!("fill ring mmap: {e}"))
+        )?;
+
         let cq = Ring::new(
             fd.as_raw_fd(),
             &offs.cr,
@@ -318,7 +357,9 @@ impl UMem {
             cq_entries,
             8,
         )
-        .map_err(|e| io::Error::other(format!("completion ring mmap: {e}")))?;
+        .map_err(
+            |e| io::Error::other(format!("completion ring mmap: {e}"))
+        )?;
 
         Ok(Self {
             _fd: Rc::new(fd),
@@ -356,17 +397,20 @@ impl UMem {
         let mut free = self
             .cached_fill_consumer
             .wrapping_sub(self.cached_fill_producer);
+
         if (free as usize) < needed {
             self.cached_fill_consumer = self.fq.consumer_load().wrapping_add(self.fq.entries);
             free = self
                 .cached_fill_consumer
                 .wrapping_sub(self.cached_fill_producer);
         }
+
         free as usize
     }
 
     pub(crate) fn fill_needs_wakeup(&self) -> bool {
-        self.fq.flags_load() & XDP_RING_NEED_WAKEUP != 0
+        self.fq
+            .flags_load() & XDP_RING_NEED_WAKEUP != 0
     }
 
     /// Push frame addresses onto the fill ring; returns how many fit.
@@ -377,25 +421,40 @@ impl UMem {
             self.fq
                 .write_desc64(self.cached_fill_producer.wrapping_add(i as u32), addr);
         }
+
         self.cached_fill_producer = self.cached_fill_producer.wrapping_add(n as u32);
         if n > 0 {
             self.fq.producer_store(self.cached_fill_producer);
         }
+
         n
     }
 
     /// Pop up to `max` completed TX descriptors from the completion ring.
     pub(crate) fn cq_pop(&mut self, out: &mut Vec<u64>, max: usize) -> usize {
-        let prod = self.cq.producer_load();
+        let prod = self
+            .cq
+            .producer_load();
+
         let mut n = 0;
         while self.cached_cq_consumer != prod && n < max {
-            out.push(self.cq.desc64(self.cached_cq_consumer));
-            self.cached_cq_consumer = self.cached_cq_consumer.wrapping_add(1);
+            out
+                .push(
+                    self.cq.desc64(self.cached_cq_consumer)
+                );
+
+            self.cached_cq_consumer = self
+                .cached_cq_consumer
+                .wrapping_add(1);
+
             n += 1;
         }
+
         if n > 0 {
-            self.cq.consumer_store(self.cached_cq_consumer);
+            self.cq
+                .consumer_store(self.cached_cq_consumer);
         }
+
         n
     }
 
@@ -421,6 +480,7 @@ pub(crate) fn validate_ring_size(entries: usize) -> io::Result<()> {
             "ring size must be a power of two <= 2^30",
         ));
     }
+
     Ok(())
 }
 
@@ -446,20 +506,22 @@ mod ring_tests {
     use super::*;
     #[test]
     fn ring_descriptors_wrap_at_u32_boundary() {
-        let r = Ring::simulated(4, 16);
+        let ring = Ring::simulated(4, 16);
         let first = u32::MAX - 1;
         for i in 0..4 {
-            r.write_desc16(first.wrapping_add(i), i as u64 * 4096 + 256, 100);
+            ring.write_desc16(first.wrapping_add(i), i as u64 * 4096 + 256, 100);
         }
-        r.producer_store(first.wrapping_add(4));
-        assert_eq!(r.producer_load().wrapping_sub(first), 4);
+
+        ring.producer_store(first.wrapping_add(4));
+        assert_eq!(ring.producer_load().wrapping_sub(first), 4);
         for i in 0..4 {
             assert_eq!(
-                r.desc16(first.wrapping_add(i)),
+                ring.desc16(first.wrapping_add(i)),
                 (i as u64 * 4096 + 256, 100)
             );
         }
     }
+
     #[test]
     fn fill_publication_never_reclaims_kernel_owned_entries() {
         let file: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
@@ -474,10 +536,12 @@ mod ring_tests {
             cached_fill_consumer: 2,
             cached_cq_consumer: 0,
         };
+
         umem.fq.consumer_store(u32::MAX - 1);
         assert_eq!(umem.fill_push(&[0, 4096, 8192, 12288]), 4);
         assert_eq!(umem.fq.producer_load(), 2);
         assert_eq!(umem.fill_push(&[0]), 0);
+
         umem.fq.consumer_store(0); // model the kernel consuming two entries
         assert_eq!(umem.fill_push(&[0, 4096]), 2);
         assert_eq!(umem.fq.producer_load(), 4);

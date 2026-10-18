@@ -81,8 +81,10 @@ def probe():
         udp.bind((STA_IP, 0))
         udp.sendto(QUERY, ('255.255.255.255', 9000))
         data, peer = udp.recvfrom(2048)
+        
         if data != ADVERT or peer != (AP_IP, 9000):
             raise RuntimeError(f'unexpected discovery response from {peer}')
+        
     payload = b'hwsim TCP echo\n'
     with socket.create_connection((AP_IP, 9001), timeout=2) as tcp:
         tcp.sendall(payload)
@@ -94,11 +96,13 @@ def probe():
             reply += part
         if reply != payload:
             raise RuntimeError('TCP echo mismatch')
+        
     emit('wifi_probe_ok', discovery=peer[0], tcp_bytes=len(reply))
 
 
 def command(*args, ns=None, check=True):
     argv = (['ip', 'netns', 'exec', ns] if ns else []) + list(map(str, args))
+    
     return subprocess.run(argv, check=check, text=True, capture_output=True, timeout=10)
 
 
@@ -109,6 +113,7 @@ def interfaces(phy):
 
 def hwsim(phy):
     driver = Path('/sys/class/ieee80211')/phy/'device/driver'
+    
     return driver.exists() and driver.resolve().name == 'mac80211_hwsim'
 
 
@@ -131,23 +136,31 @@ def main():
                    help='measure UDP policies through baseline, congestion, outage and recovery')
     p.add_argument('--role', choices=['firmware', 'probe'], help=argparse.SUPPRESS)
     a = p.parse_args()
+    
     if a.role:
         return firmware() if a.role == 'firmware' else probe()
+    
     if sys.platform != 'linux' or os.geteuid() != 0:
         p.error('run as root inside Linux; no host Wi-Fi hardware is used')
+        
     if not 1 <= a.timeout <= 300:
         p.error('--timeout must be 1..300')
+        
     if not (0 <= a.ap_loss <= 1 and 0 <= a.station_loss <= 1):
         p.error('radio loss probabilities must be 0..1')
+        
     if a.medium == 'kernel' and (a.ap_loss or a.station_loss):
         p.error('radio loss requires --medium wmediumd')
+        
     if a.compare and not Path(__file__).with_name('udp-policy-probe.py').is_file():
         p.error('comparison requires udp-policy-probe.py beside this script; rebuild the guest bundle')
+        
     use_netem = a.compare or a.netem_ap != 'clean' or a.netem_station != 'clean'
     extra_tools = (['tc'] if use_netem else []) + (['wmediumd'] if a.medium == 'wmediumd' else [])
     for tool in ['ip', 'iw', 'hostapd', 'wpa_supplicant', 'wpa_cli'] + extra_tools:
         if not shutil.which(tool):
             p.error(f'missing {tool}; install iproute2 iw hostapd wpasupplicant wmediumd')
+            
     if a.medium == 'wmediumd':
         # Registration affects the radios' creation netgroup, even after moving
         # their PHYs. Require the dedicated two-radio environment for this mode.
@@ -160,31 +173,39 @@ def main():
                     p.error('an existing wmediumd is running; stop it before starting this lab')
             except (FileNotFoundError, ProcessLookupError):
                 pass
+            
     if a.guest_auto:
         if a.ap_phy or a.station_phy:
             p.error('choose --guest-auto OR the two explicit PHYs')
         phys = sorted(x.name for x in Path('/sys/class/ieee80211').glob('phy*') if hwsim(x.name))
         if len(phys) != 2:
             p.error(f'expected exactly two hwsim radios, found {phys}; boot the Wi-Fi kernel bundle')
+            
         a.ap_phy, a.station_phy = phys
     if not a.ap_phy or not a.station_phy or a.ap_phy == a.station_phy:
         p.error('supply distinct --ap-phy and --station-phy, or --guest-auto in a dedicated guest')
+        
     selected = []
     for phy in (a.ap_phy, a.station_phy):
         if not hwsim(phy):
             p.error(f'{phy} is not a mac80211_hwsim radio')
+            
         names = interfaces(phy)
         if len(names) != 1:
             p.error(f'{phy} must have exactly one unused interface, found {names}')
+            
         name = names[0]
         info = json.loads(command('ip', '-j', 'address', 'show', 'dev', name).stdout)[0]
         if 'UP' in info['flags'] or info.get('addr_info'):
             p.error(f'{name} is configured/in use; choose unused hwsim radios')
+            
         if 'type managed' not in command('iw', 'dev', name, 'info').stdout:
             p.error(f'{name} must be an unused managed-mode interface')
+            
         selected.append((phy, name))
 
     run = Path(tempfile.mkdtemp(prefix='wifi-lab-'))
+    
     # Keep control socket paths short enough for sockaddr_un.
     ap_ns, sta_ns = f'wifi-ap-{os.getpid()}', f'wifi-sta-{os.getpid()}'
     children, logs, namespaces, moved, shaped = [], [], [], [], []
@@ -197,6 +218,7 @@ def main():
         child = subprocess.Popen(prefix + list(map(str, argv)),
                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         children.append(child)
+        
         return child
 
     def alive():
@@ -216,12 +238,15 @@ def main():
             state[ns] = {}
             commands = [('addresses', ['ip', '-j', 'address', 'show']),
                         ('stations', ['iw', 'dev', iface, 'station', 'dump'])]
+            
             if use_netem:
                 commands.append(('qdisc', ['tc', '-s', '-j', 'qdisc', 'show', 'dev', iface]))
+                
             for key, argv in commands:
                 result = command(*argv, ns=ns, check=False)
                 state[ns][key] = dict(stdout=result.stdout, stderr=result.stderr,
                                       returncode=result.returncode)
+                
         (run/f'{label}.json').write_text(json.dumps(state, indent=2)+'\n')
 
     # SIGTERM and Ctrl-C both pass through the cleanup below.
@@ -239,7 +264,9 @@ def main():
                             'model: { type = "prob"; default_prob = 1.0; links = ('
                             f'(0, 1, {a.ap_loss:.8f}), (1, 0, {a.station_loss:.8f})'
                             '); };\n')
+            
             spawn(None, 'wmediumd', 'wmediumd', '-l', '5', '-c', conf)
+            
             # Start in the radios' original namespace before association. Startup
             # output is a bounded handshake, not proof of successful RF delivery.
             ready_by = time.monotonic() + a.timeout
@@ -248,6 +275,7 @@ def main():
                 if time.monotonic() >= ready_by:
                     raise RuntimeError('wmediumd did not report registration; inspect its log')
                 time.sleep(0.1)
+                
         versions = {}
         for tool, flag in [('ip', '-V'), ('iw', '--version')] + \
                 ([('tc', '-V')] if use_netem else []) + \
@@ -258,6 +286,7 @@ def main():
             kernel=os.uname().release, arguments=vars(a), radios=selected,
             tool_versions=versions, netem_profiles=NETEM,
             ap_namespace=ap_ns, station_namespace=sta_ns), indent=2)+'\n')
+        
         for ns, (phy, iface), address in zip((ap_ns, sta_ns), selected, (AP_IP, STA_IP)):
             command('ip', 'netns', 'add', ns)
             namespaces.append(ns)
@@ -266,19 +295,24 @@ def main():
             command('ip', 'link', 'set', 'lo', 'up', ns=ns)
             command('ip', 'address', 'add', address+'/24', 'dev', iface, ns=ns)
             command('ip', 'link', 'set', iface, 'up', ns=ns)
+            
         ap_if, sta_if = selected[0][1], selected[1][1]
         ap_conf, sta_conf = run/'hostapd.conf', run/'station.conf'
+        
         # OFDM rates avoid wmediumd's CCK rate-table mismatch on 2.4 GHz.
         rates = 'supported_rates=60 90 120 180 240 360 480 540\nbasic_rates=60 120 240\n' if a.medium == 'wmediumd' else ''
         ap_conf.write_text(f'interface={ap_if}\ndriver=nl80211\nssid=async-net-lab\n'
                            'hw_mode=g\nchannel=1\n'+rates+'wpa=2\nwpa_key_mgmt=WPA-PSK\n'
                            'rsn_pairwise=CCMP\nwpa_passphrase=lab-password-only\n')
+        
         sta_conf.write_text(f'ctrl_interface={run}/ctrl\np2p_disabled=1\nnetwork={{\n'
                             ' ssid="async-net-lab"\n psk="lab-password-only"\n'
                             ' key_mgmt=WPA-PSK\n proto=RSN\n pairwise=CCMP\n}\n')
+        
         spawn(ap_ns, 'hostapd', 'hostapd', '-dd', ap_conf)
         spawn(sta_ns, 'station', 'wpa_supplicant', '-Dnl80211', '-i', sta_if, '-c', sta_conf)
         spawn(ap_ns, 'firmware', sys.executable, script, '--role', 'firmware')
+        
         deadline = time.monotonic() + a.timeout
         while True:
             alive()
@@ -289,6 +323,7 @@ def main():
             if time.monotonic() >= deadline:
                 raise RuntimeError('association timed out')
             time.sleep(0.2)
+            
         # Limited broadcast needs a link route; it is not forwarded through TUN.
         command('ip', 'route', 'add', '255.255.255.255/32', 'dev', sta_if, ns=sta_ns)
         while True:
@@ -301,12 +336,14 @@ def main():
                 raise RuntimeError('discovery/TCP probe timed out: '+result.stderr)
             time.sleep(0.2)
         emit('wifi_lab_pass', logs=str(run))
+        
         # Apply IP egress impairment after the initial association/smoke probe.
         # Radio impairment above also affects authentication/association frames.
         if use_netem:
             shape(ap_ns, ap_if, a.netem_ap)
             shape(sta_ns, sta_if, a.netem_station)
         snapshot('initial')
+        
         if a.compare:
             probe_script = Path(script).with_name('udp-policy-probe.py')
             rows = []
@@ -314,20 +351,26 @@ def main():
                       ('congested', 'congested', 'congested'),
                       ('outage', 'clean', 'outage'),
                       ('recovered', a.netem_ap, a.netem_station)]
+            
             for repeat in range(1, 4):
                 for phase, ap_profile, sta_profile in phases:
+                    
                     shape(ap_ns, ap_if, ap_profile)
                     shape(sta_ns, sta_if, sta_profile)
+                    
                     # Let previously queued packets drain; replacing a qdisc may
                     # discard packets, so changes happen between measurements.
                     time.sleep(1)
+                    
                     policies = ('burst', 'paced') if repeat % 2 else ('paced', 'burst')
                     for policy in policies:
                         alive()
+                        
                         # Bound each subprocess and continue supervising daemons.
                         child = spawn(sta_ns, f'{repeat}-{phase}-{policy}', sys.executable,
                                       probe_script, '--target', AP_IP, '--port', '9002',
                                       '--count', '300', '--policy', policy)
+                        
                         until = time.monotonic() + 30
                         while child.poll() is None:
                             if any(c is not child and c.poll() is not None for c in children):
@@ -335,10 +378,13 @@ def main():
                             if time.monotonic() >= until:
                                 raise RuntimeError('UDP comparison timed out')
                             time.sleep(0.1)
+                            
                         if child.returncode:
                             raise RuntimeError(f'UDP comparison failed; inspect {run}')
+                        
                         children.remove(child)
                         alive()
+                        
                         row = json.loads((run/f'{repeat}-{phase}-{policy}.log').read_text())
                         row.update(repeat=repeat, profile=phase, medium=a.medium,
                                    ap_loss=a.ap_loss, station_loss=a.station_loss,
@@ -346,10 +392,13 @@ def main():
                         rows.append(row)
                         (run/'comparison.json').write_text(json.dumps(rows, indent=2)+'\n')
                         emit('wifi_udp_result', **row)
+                        
                     snapshot(f'{repeat}-{phase}')
+                    
             result = command(sys.executable, probe_script, '--report', run/'comparison.json')
             emit('wifi_comparison_complete', report=result.stdout.strip())
         alive()
+        
         if a.hold:
             print(f'Lab remains active. Probe again: ip netns exec {sta_ns} '
                   f'{sys.executable} {script} --role probe', flush=True)
@@ -357,9 +406,11 @@ def main():
                 alive()
                 time.sleep(1)
     finally:
+        
         # Do not let a second cancellation interrupt resource cleanup.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        
         for child in reversed(children):
             if child.poll() is None:
                 try:
@@ -371,14 +422,17 @@ def main():
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
+                    
         for log in logs:
             log.close()
+            
         cleanup_errors = []
         for ns, iface in reversed(shaped):
             try:
                 command('tc', 'qdisc', 'del', 'dev', iface, 'root', ns=ns)
             except (OSError, subprocess.SubprocessError) as error:
                 cleanup_errors.append(str(error))
+                
         for ns, phy, iface in reversed(moved):
             for args in [('ip', 'address', 'flush', 'dev', iface),
                          ('ip', 'link', 'set', iface, 'down'),
@@ -388,14 +442,17 @@ def main():
                     command(*args, ns=ns)
                 except (OSError, subprocess.SubprocessError) as error:
                     cleanup_errors.append(str(error))
+                    
         for ns in reversed(namespaces):
             try:
                 command('ip', 'netns', 'delete', ns)
             except (OSError, subprocess.SubprocessError) as error:
                 cleanup_errors.append(str(error))
+                
         if cleanup_errors:
             emit('wifi_cleanup_failed', errors=cleanup_errors)
             raise RuntimeError('incomplete namespace/radio cleanup')
+        
         emit('wifi_lab_cleaned', logs=str(run))
 
 
@@ -406,6 +463,8 @@ if __name__ == '__main__':
         sys.exit(130)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Wi-Fi lab failed: {error}', file=sys.stderr)
+        
         if isinstance(error, subprocess.CalledProcessError):
             print(error.stderr, file=sys.stderr)
+            
         sys.exit(1)

@@ -1,4 +1,5 @@
 //! Scripted Ethernet peer tests. These do not need Linux, privileges, or sleeps.
+use async_net_stack_rs::platform::io;
 use async_net_stack_rs::{
     device::{Device, LoopbackDevice, PacketBuf},
     net::{
@@ -9,7 +10,12 @@ use async_net_stack_rs::{
     },
     transport::udp,
 };
-use std::{collections::VecDeque, io, net::Ipv4Addr, time::Duration};
+
+use std::{
+    collections::VecDeque,
+    net::Ipv4Addr,
+    time::Duration
+};
 
 const LOCAL: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 20);
 const PEER: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 50);

@@ -1,6 +1,8 @@
 //! Small bounded IPv4 routing table. Gateways must be directly reachable on
 //! the adapter's Ethernet link; recursive routes and policy routing are absent.
-use std::{io, net::Ipv4Addr};
+use crate::platform::io;
+use crate::platform::net::Ipv4Addr;
+use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Route {

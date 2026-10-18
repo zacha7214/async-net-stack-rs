@@ -43,8 +43,27 @@ cargo run --locked --example coordinator_lab
 ```
 
 This deterministic example discovers a service over UDP, connects over TCP,
-injects a partition, and verifies recovery. See the [composition guide](docs/coordinator.md)
+uses bandwidth-limited links, injects a partition, and verifies recovery. See the [composition guide](docs/coordinator.md)
 for assembly, ownership, fault semantics, and current limits.
+
+Shared byte-bounded FIFO bottlenecks model link serialization, competing flows,
+and overflow with explicit virtual time. Run `cargo run --locked --example bandwidth_lab`
+for a rate/queue-size comparison. See [bandwidth experiments](docs/bandwidth-lab.md).
+The serializer uses only `core` and `alloc`, supporting the design goal of steadily
+reducing what a bare-metal port needs to replace.
+
+## Portable core
+
+`async-net-stack-core` builds the same TCP/UDP, Ethernet/ARP, coordinator and
+simulation sources with `no_std` + `alloc`, without host dependencies. Host
+features and APIs remain available through this package. Run
+`cargo test --locked -p async-net-stack-core`; see the [portability guide](docs/portable-core.md)
+for ARM/RISC-V builds, platform responsibilities and the remaining DMA boundary.
+
+`device::dma` provides TX mapping/completion ownership, an RX posted-buffer queue
+with received-length validation, and a scripted TX fault backend. Run `cargo run --locked --example dma_lab` to exercise
+buffer pressure, delayed/duplicate completions and shutdown. See the
+[DMA ownership guide](docs/dma-ownership.md) for guarantees and the remaining hardware boundary.
 
 ## Linux capture bundles
 

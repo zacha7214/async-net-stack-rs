@@ -11,6 +11,7 @@ use std::{
 fn addr(n: u8) -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, n), 9000)
 }
+
 const LEASE: Duration = Duration::from_secs(1);
 
 #[test]
@@ -37,14 +38,22 @@ fn discovery_transfer_partition_and_expiry() {
             id: 0,
         })
         .unwrap();
+    
     client
         .discover(addr(1), SocketAddrV4::new(Ipv4Addr::BROADCAST, 9000), 7)
         .unwrap();
-    client.flush().unwrap();
+    
+    client
+        .flush()
+        .unwrap();
 
     pool.poll(net.now(), LEASE, 8, |_| panic!("discovery reached handler"))
         .unwrap();
-    pool.flush().unwrap();
+    
+    pool
+        .flush()
+        .unwrap();
+    
     client
         .poll(net.now(), LEASE, 8, |_| panic!("advert reached handler"))
         .unwrap();
@@ -81,6 +90,7 @@ fn discovery_transfer_partition_and_expiry() {
     client.flush().unwrap();
     assert_eq!(pool.poll(net.now(), LEASE, 8, |_| panic!()).unwrap(), 0);
     assert_eq!(net.stats().fault_drops, 1);
+    
     net.advance(LEASE).unwrap();
     client
         .poll(net.now(), LEASE, 8, |_| Action::Ignore)
@@ -196,7 +206,7 @@ fn mtu_loss_queue_bounds_and_monotonic_clock() {
             .send_to(addr(1), addr(2), b"large")
             .unwrap_err()
             .kind(),
-        std::io::ErrorKind::WouldBlock
+        async_net_stack_rs::platform::io::ErrorKind::WouldBlock
     );
 
     assert_eq!(client.flush().unwrap(), 2);

@@ -91,3 +91,23 @@ advisory and do not pin a worker to an exact CPU.
    bounded scatter/gather packet views, and completion tests before enabling SG.
 5. AF_PACKET baseline using sendmmsg/recvmmsg or TPACKET_V3. Compare it to
    generic XDP copy without syscall and copy costs altering the results.
+
+
+## Portability constraint and the next milestone
+
+Future changes should steadily reduce the code a bare-metal port must replace.
+Keep clocks and entropy supplied by the application; keep packet scheduling and
+protocol decisions separate from host I/O, memory allocation and device drivers.
+New reusable algorithms should prefer `core`/`alloc`, as the bandwidth serializer
+does. Preserve existing Linux backends and supported macOS behavior while moving
+platform dependencies behind explicit interfaces. The host crate still uses `std`; a separate [portable core](portable-core.md)
+now builds the same protocol and simulation engines with `no_std` + `alloc`.
+
+The simulator now composes protocol dispatch, AP lifecycle, timed fault injection
+and bandwidth/byte-queue bottlenecks. The platform-seam audit and portable core build now isolate host error and
+entropy services, retain explicit time, and run shared deterministic scenarios.
+The [TX DMA memory/completion interface](dma-ownership.md) now has a scripted
+fault backend. Next extend it to RX posted-buffer ownership before real NIC
+integration; hardware-specific mapping/cache/ring code remains replaceable.
+Capture-derived topology/state reconstruction and more elaborate queue policies
+remain independent experiments, not prerequisites for starting the portable core.

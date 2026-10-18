@@ -187,7 +187,9 @@ impl Ring {
     }
 
     fn load(map: &Mapping, offset: u32) -> u32 {
-        unsafe { (&*map.at::<AtomicU32>(offset as usize)).load(Ordering::Acquire) }
+        unsafe { 
+            (&*map.at::<AtomicU32>(offset as usize)).load(Ordering::Acquire)
+        }
     }
 
     fn store(map: &Mapping, offset: u32, value: u32) {

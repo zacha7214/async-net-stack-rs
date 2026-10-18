@@ -111,6 +111,7 @@ impl Capture {
         reader
             .take((limits.bytes as u64).saturating_add(1))
             .read_to_end(&mut bytes)?;
+        
         Self::parse(&bytes, limits)
     }
 
@@ -126,9 +127,11 @@ impl Capture {
         };
 
         if bytes.starts_with(PCAPNG_MAGIC) {
-            result.pcapng(bytes, limits)?;
+            result
+                .pcapng(bytes, limits)?;
         } else {
-            result.pcap(bytes, limits)?;
+            result
+                .pcap(bytes, limits)?;
         }
 
         Ok(result)
@@ -138,8 +141,10 @@ impl Capture {
         if self.interfaces.len() >= limits.interfaces {
             return Err(invalid("interface limit exceeded"));
         }
+        
         interface.id = self.interfaces.len();
         self.interfaces.push(interface);
+        
         Ok(())
     }
 
@@ -168,13 +173,16 @@ impl Capture {
             ));
         }
 
-        self.records.push(Record {
-            index: self.records.len() + 1,
-            interface,
-            timestamp,
-            original_len,
-            bytes: bytes.to_vec(),
-        });
+        self.records
+            .push(
+                Record { 
+                    index: self.records.len() + 1, 
+                    interface, 
+                    timestamp, 
+                    original_len, 
+                    bytes: bytes.to_vec(), 
+                }
+            );
 
         Ok(())
     }
@@ -211,7 +219,8 @@ impl Capture {
         )?;
 
         if e.u32(&h[20..]) >> 16 != 0 {
-            self.notes
+            self
+                .notes
                 .push("pcap link-type flags retained only in source file; IPv4 extraction excludes trailing FCS".into());
         }
 
@@ -227,7 +236,13 @@ impl Capture {
             let at = Duration::new(e.u32(h) as u64, at_nsecs);
             let packet = take(&mut bytes, e.u32(&h[8..]) as usize)?;
             let original_pkt_len = e.u32(&h[12..]);
-            self.record(0, Some(at), original_pkt_len, packet, limits)?;
+            self
+                .record(
+                    0, 
+                    Some(at), 
+                    original_pkt_len, packet,
+                    limits
+                )?;
         }
 
         Ok(())
@@ -236,6 +251,7 @@ impl Capture {
     fn pcapng(&mut self, mut bytes: &[u8], limits: Limits) -> io::Result<()> {
         let mut endian = None;
         let mut local = Vec::new();
+        
         while !bytes.is_empty() {
             if bytes.len() < 12 {
                 return Err(invalid("truncated pcapng block"));
@@ -313,6 +329,7 @@ impl Capture {
                     let id = *local
                         .get(id)
                         .ok_or_else(|| invalid("unknown section interface"))?;
+                    
                     let ticks = ((e.u32(&body[4..]) as u64) << 32) | e.u32(&body[8..]) as u64;
                     let iface = &self.interfaces[id];
                     let (at, rounded) = timestamp(
@@ -343,11 +360,13 @@ impl Capture {
                     let id = *local
                         .first()
                         .ok_or_else(|| invalid("simple packet without interface"))?;
+                    
                     let original = e.u32(body);
                     let snaplen = self.interfaces[id].snaplen;
                     let size = if snaplen == 0 {
                         original
-                    } else {
+                    } 
+                    else {
                         original.min(snaplen)
                     } as usize;
 
@@ -355,9 +374,11 @@ impl Capture {
                         return Err(invalid("invalid simple packet size"));
                     }
 
-                    self.record(id, None, original, &body[4..4 + size], limits)?;
+                    self
+                        .record(id, None, original, &body[4..4 + size], limits)?;
                 }
-                _ => self.note(format!("pcapng block {kind:#x} not interpreted")),
+                _ => self
+                    .note(format!("pcapng block {kind:#x} not interpreted")),
             }
         }
 
@@ -386,7 +407,8 @@ fn options(mut bytes: &[u8], e: Endian) -> io::Result<Vec<(u16, &[u8])>> {
         }
 
         let value = take(&mut bytes, padded(size)?)?;
-        result.push((code, &value[..size]));
+        result
+            .push((code, &value[..size]));
     }
 
     Ok(result)

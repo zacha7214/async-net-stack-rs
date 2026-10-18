@@ -32,6 +32,7 @@ class Report:
     def show(self, title):
         print(f'\n== {title} ==')
         width = max((len(r[1]) for r in self.rows), default=0)
+        
         for status, name, detail, fix in self.rows:
             print(f'  [{status:4}] {name:<{width}}  {detail}')
             if fix and status != OK: print(f'{"":>11}{"":<{width}}  -> {fix}')
@@ -61,19 +62,24 @@ def check_host(r, qemu, backend):
         code, out = probe([str(qemu), '--version'])
         r.add(OK if not code else FAIL, 'qemu', out.splitlines()[0] if out else 'unusable', str(qemu))
         _, accel = probe([str(qemu), '-accel', 'help'])
+        
         names = accel.split()
         r.add(OK if 'tcg' in names else FAIL, 'qemu accel tcg',
               'available' if 'tcg' in names else 'missing', 'TCG is required for --debug')
+        
         wanted = 'hvf' if platform.system() == 'Darwin' else 'kvm'
         r.add(OK if wanted in names else WARN, f'qemu accel {wanted}',
               'available' if wanted in names else 'missing',
               'only TCG runs will work; fine for correctness, not for performance')
+        
         _, devs = probe([str(qemu), '-device', 'help'])
         _, nets = probe([str(qemu), '-machine', 'virt', '-netdev', 'help'])
+        
         vhost = 'virtio-net-pci' in devs and 'vhost-user' in nets
         r.add(OK if vhost else WARN, 'qemu vhost-user',
               'supported' if vhost else 'missing',
               'needed only for the XDP data path; --no-lab-nic boots without it')
+        
         # Stock QEMU also advertises vhost-user, so the check above cannot tell a
         # lab build from a distribution one. qemu-lab.py records what it applied.
         record = qemu.parent/'qemu-lab.json'
@@ -89,12 +95,14 @@ def check_host(r, qemu, backend):
     for name in ('lldb', 'gdb', 'aarch64-elf-gdb'):
         path = shutil.which(name)
         if path: r.add(OK, f'debugger {name}', path)
+        
     if not any(shutil.which(n) for n in ('lldb', 'gdb', 'aarch64-elf-gdb')):
         r.add(FAIL, 'debugger', 'none found', 'install Xcode command line tools, or: brew install gdb')
 
     r.add(OK if shutil.which('cargo') else WARN, 'cargo',
           shutil.which('cargo') or 'missing',
           'needed only to build the host vhost_user_net backend')
+    
     if backend is not None:
         r.add(OK if backend.is_file() else WARN, 'host backend',
               str(backend) if backend.is_file() else 'not built',
@@ -112,6 +120,7 @@ def check_builder(r, builder, source, work):
     _, missing = vm('bash', '-lc',
                     'export PATH="$HOME/.cargo/bin:$PATH"; for t in ' + ' '.join(VM_TOOLS) +
                     '; do command -v $t >/dev/null || echo $t; done')
+    
     gaps = missing.split()
     r.add(OK if not gaps else FAIL, 'vm toolchain', 'complete' if not gaps else 'missing: ' + ' '.join(gaps),
           'sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev '
@@ -125,6 +134,7 @@ def check_builder(r, builder, source, work):
     code, _ = vm('test', '-f', source + '/Makefile')
     r.add(OK if not code else FAIL, 'kernel source', source + ('' if not code else ' has no Makefile'),
           'pass --source with the kernel tree inside the VM')
+    
     if not code:
         _, rel = vm('bash', '-lc', f'make -s -C {source} kernelversion 2>/dev/null')
         r.add(OK, 'kernel version', rel.strip() or 'unknown')
@@ -140,6 +150,7 @@ def check_builder(r, builder, source, work):
           f'{avail}G free' if avail >= 0 else 'unknown',
           'a debug-info kernel build plus bundle needs roughly 15G')
     _, mem = vm('bash', '-lc', "free -m | awk '/^Mem:/{print $2}'")
+    
     try: total = int(mem.strip())
     except ValueError: total = -1
     r.add(OK if total < 0 or total >= 2048 else WARN, 'vm memory',
@@ -163,6 +174,7 @@ def main():
     check_host(host, a.qemu, a.backend)
     host.show('host')
     failed = host.failed
+    
     # "--instance ''" has always meant "host checks only"; --skip-builder is the
     # way to say that for the builders where an instance name is meaningless.
     if not a.skip_builder and not (a.builder == 'multipass' and not a.instance):
@@ -178,12 +190,15 @@ def main():
                     check_builder(report, builder, source, work)
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 report.add(FAIL, 'builder', 'unusable', str(error))
+                
         report.show(f'builder: {builder.describe()}')
         failed = failed or report.failed
+        
     print('\nFAIL entries block the lab; warn entries only limit which runs are possible.'
           if failed else '\nAll required checks passed.')
     print('Next: python3 scripts/kernel-lab-build.py '
           + ' '.join(lab_builders.forward(a)) + ' --output results/kernel-lab')
+    
     return 1 if failed else 0
 
 

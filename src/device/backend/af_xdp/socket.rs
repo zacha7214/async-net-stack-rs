@@ -46,6 +46,7 @@ impl XskSocket {
         set_sockopt(fd, XDP_TX_RING, &(tx_entries as u32))?;
         let mut offs = XdpMmapOffsets::default();
         get_sockopt(fd, XDP_MMAP_OFFSETS, &mut offs)?;
+        
         // Map before bind; a mapping error must never cause a second bind.
         let rx = Ring::new(
             fd,
@@ -54,6 +55,7 @@ impl XskSocket {
             rx_entries,
             mem::size_of::<XdpDesc>(),
         )?;
+        
         let tx = Ring::new(
             fd,
             &offs.tx,
@@ -61,6 +63,7 @@ impl XskSocket {
             tx_entries,
             mem::size_of::<XdpDesc>(),
         )?;
+        
         let sa = SockAddrXdp {
             family: AF_XDP as _,
             flags: bind_flags,
@@ -68,6 +71,7 @@ impl XskSocket {
             queue_id,
             shared_umem_fd: 0,
         };
+        
         let ret = unsafe {
             libc::bind(
                 fd,
@@ -75,9 +79,11 @@ impl XskSocket {
                 mem::size_of::<SockAddrXdp>() as _,
             )
         };
+        
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
+        
         let mut opts = XdpOptions::default();
         get_sockopt(fd, XDP_OPTIONS, &mut opts)?;
         let active = if opts.flags & XDP_OPTIONS_ZEROCOPY != 0 {
@@ -85,12 +91,14 @@ impl XskSocket {
         } else {
             XDP_COPY
         };
+        
         if bind_flags & XDP_ZEROCOPY != 0 && active != XDP_ZEROCOPY {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "kernel did not confirm zero-copy",
             ));
         }
+        
         Ok(Self {
             fd: umem._fd.clone(),
             _arena: umem.arena_owner(),
@@ -105,9 +113,11 @@ impl XskSocket {
     pub(crate) fn fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
+    
     pub fn bind_flags(&self) -> libc::c_ushort {
         self.bind_flags
     }
+    
     pub fn need_wakeup_enabled(&self) -> bool {
         self.bind_flags & XDP_USE_NEED_WAKEUP != 0 && !self.tx.flags.is_null()
     }
@@ -116,11 +126,13 @@ impl XskSocket {
         get_sockopt(self.fd(), XDP_OPTIONS, &mut opts)?;
         Ok(opts.flags)
     }
+    
     pub fn stats(&self) -> io::Result<XdpStatistics> {
         let mut stats = XdpStatistics::default();
         get_sockopt(self.fd(), XDP_STATISTICS, &mut stats)?;
         Ok(stats)
     }
+    
     pub fn kick(&self) {
         kick(self.fd());
     }
@@ -130,28 +142,38 @@ impl XskSocket {
             self.kick();
         }
     }
+    
     pub(crate) fn wake_rx(&self) {
         let mut pfd = libc::pollfd {
             fd: self.fd(),
             events: libc::POLLIN,
             revents: 0,
         };
+        
         unsafe {
             libc::poll(&mut pfd, 1, 0);
         }
     }
+    
     pub(crate) fn tx_free_slots(&mut self, needed: usize) -> usize {
         let mut free = self
             .cached_tx_consumer
             .wrapping_sub(self.cached_tx_producer);
+        
         if (free as usize) < needed {
-            self.cached_tx_consumer = self.tx.consumer_load().wrapping_add(self.tx.entries);
+            self.cached_tx_consumer = self
+                .tx
+                .consumer_load()
+                .wrapping_add(self.tx.entries);
+            
             free = self
                 .cached_tx_consumer
                 .wrapping_sub(self.cached_tx_producer);
         }
+        
         free as usize
     }
+    
     pub(crate) fn rx_pop(&mut self, out: &mut Vec<(u64, u32)>, max: usize) -> usize {
         let n = max.min(
             self.rx
@@ -170,16 +192,22 @@ impl XskSocket {
         }
         n
     }
+    
     pub(crate) fn tx_push(&mut self, descs: &[(u64, u32)]) -> usize {
         let n = descs.len().min(self.tx_free_slots(descs.len()));
         for (i, &(addr, len)) in descs[..n].iter().enumerate() {
             self.tx
                 .write_desc16(self.cached_tx_producer.wrapping_add(i as u32), addr, len);
         }
-        self.cached_tx_producer = self.cached_tx_producer.wrapping_add(n as u32);
+        
+        self.cached_tx_producer = self
+            .cached_tx_producer
+            .wrapping_add(n as u32);
+        
         if n > 0 {
             self.tx.producer_store(self.cached_tx_producer);
         }
+        
         n
     }
     #[cfg(test)]
@@ -195,6 +223,7 @@ impl XskSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
     #[test]
     fn tx_full_returns_immediately_and_wraps() {
         let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
@@ -208,6 +237,7 @@ mod tests {
             cached_tx_consumer: 2,
             cached_rx_consumer: 0,
         };
+        
         socket.tx.consumer_store(u32::MAX - 1);
         assert_eq!(socket.tx_push(&[(256, 60); 5]), 4);
         assert_eq!(socket.tx_push(&[(256, 60)]), 0);

@@ -7,8 +7,13 @@ use crate::{
     device::{Device, PacketBuf},
     net::checksum,
 };
+use alloc::vec::Vec;
 
-use std::{cell::RefCell, collections::VecDeque, io, rc::Rc, time::Duration};
+use crate::platform::io;
+use alloc::collections::VecDeque;
+use alloc::rc::Rc;
+use core::cell::RefCell;
+use core::time::Duration;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PortConfig {

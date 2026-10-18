@@ -9,8 +9,10 @@
 //! Because it needs no privileges and no peer, it is the harness the
 //! [`Device`](crate::device::Device) tests and benchmarks run against.
 
-use std::collections::VecDeque;
-use std::io;
+use crate::platform::io;
+use alloc::collections::VecDeque;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::device::buffer_pool::{FramePool, PacketBuf};
 use crate::device::Device;

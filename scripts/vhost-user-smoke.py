@@ -37,14 +37,17 @@ class Frontend:
         self.proc = subprocess.Popen([str(binary), "--socket", self.path, "--pps", "0",
                                       "--size", "1500", "--batch", "3", "--trace-control"],
                                      stdout=self.log, stderr=self.error)
+
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(5)
+
         deadline = time.monotonic() + 5
         while not Path(self.path).exists():
             if self.proc.poll() is not None or time.monotonic() > deadline:
                 self.error.seek(0)
                 raise RuntimeError(self.error.read())
             time.sleep(0.005)
+
         self.sock.connect(self.path)
         self.backend, peer = socket.socketpair()
         self.backend.settimeout(5)
@@ -54,18 +57,22 @@ class Frontend:
         self.misses = 0
         self.owned = []
         self.ramfile = tempfile.TemporaryFile()
+
         # Non-page-aligned memory-region offset exercises mmap's delta handling.
         self.file_offset = mmap.PAGESIZE + 128
         self.ramfile.truncate(self.file_offset + RAM)
         self.mm = mmap.mmap(self.ramfile.fileno(), self.file_offset + RAM)
         self.address = ctypes.addressof(ctypes.c_char.from_buffer(self.mm)) + self.file_offset
         self.q = {}
+
         assert struct.unpack("=Q", self.call(1))[0] == FEATURES
         assert struct.unpack("=Q", self.call(15))[0] == PROTOCOL
+
         self.call(16, struct.pack("=Q", PROTOCOL))
         self.call(3)
         self.call(21, fds=[peer.fileno()], fragment=True)
         peer.close()
+
         self.call(2, struct.pack("=Q", FEATURES if iommu else FEATURES & ~(1 << 33)))
         table = struct.pack("=IIQQQQ", 1, 0, GPA, RAM, USER, self.file_offset)
         self.call(5, table, [self.ramfile.fileno()], fragment=True)
@@ -82,39 +89,49 @@ class Frontend:
                     raise EOFError("backend closed control channel")
                 b += part
             return b
+
         request, flags, size = struct.unpack("=III", exact(12))
         return request, flags, exact(size)
 
     def send(self, request, body=b"", fds=(), fragment=False):
         self.sent[request] += 1
+
         packet = struct.pack("=III", request, 9, len(body)) + body
         ancillary = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds))] if fds else []
+
         first = packet[:1] if fragment else packet
         n = self.sock.sendmsg([first], ancillary)
         self.sock.sendall(packet[n:])
+
         return self.sent[request]
 
     def service(self, timeout=0.05):
         ready, _, _ = select.select([self.sock, self.backend], [], [], timeout)
+
         for stream in ready:
             request, flags, body = self.read_message(stream)
+
             if stream is self.sock:
                 assert flags == 5, (request, flags)
                 self.replied[request] += 1
                 self.replies[(request, self.replied[request])] = body
             else:
                 assert request == 1 and flags == 1 and len(body) == 32
+
                 address, _, _ = struct.unpack_from("=QQQ", body)
                 permission, kind = body[24:26]
                 assert kind == 1 and permission in (1, 2, 3), body
                 assert IOVA <= address < IOVA + RAM, hex(address)
+
                 page = address & ~4095
                 update = struct.pack("=QQQBB6x", page, 4096, USER + page - IOVA, permission, 2)
+
                 self.send(22, update)
                 self.misses += 1
 
     def wait(self, predicate, timeout=5):
         end = time.monotonic() + timeout
+
         while not predicate():
             if time.monotonic() >= end:
                 self.error.seek(0)
@@ -125,8 +142,10 @@ class Frontend:
         ticket = self.send(request, body, fds, fragment)
         self.wait(lambda: self.replied[request] >= ticket)
         result = self.replies.pop((request, ticket))
+
         if request not in (1, 15, 17, 11):
             assert result == bytes(8), (request, result)
+
         return result
 
     def pack(self, offset, fmt, *values):
@@ -157,6 +176,7 @@ class Frontend:
         self.call(10, struct.pack("=II", index, base))
         self.call(9, struct.pack("=IIQQQQ", index, 0, self.ring_address(desc),
                                self.ring_address(used), self.ring_address(avail), 0))
+
         if self.eventfd:
             kick_read = kick_write = os.eventfd(0, os.EFD_NONBLOCK)
             call_read = call_write = os.eventfd(0, os.EFD_NONBLOCK)
@@ -166,9 +186,11 @@ class Frontend:
             call_read, call_write = os.pipe()
             self.owned.extend([kick_read, kick_write, call_read, call_write])
             os.set_blocking(call_read, False)
+
         self.call(13, struct.pack("=Q", index), [call_write])
         self.call(12, struct.pack("=Q", index), [kick_read])
         self.call(18, struct.pack("=II", index, 1))
+
         self.q[index] = dict(n=n, desc=desc, avail=avail, used=used, posted=base,
                              consumed=base, kick=kick_write, call=call_read)
 
@@ -192,13 +214,16 @@ class Frontend:
             else:
                 self.pack(q["desc"] + head*16, "<QIHH", self.data_address(buf), 2048,
                           3 if malformed and slot == 0 else 2, head)
+
             heads.append(head)
+
         self.post(0, heads)
 
     def start(self, session, count):
         q = self.q[1]
         header = bytes.fromhex("02000000000202000000000188b55653") + struct.pack("<QQIIQ", 0, count, 64, 0, session)
         data = bytes(12) + header + bytes(64-len(header))
+
         self.mm[self.file_offset+0x20000:self.file_offset+0x20000+len(data)] = data
         self.pack(q["desc"], "<QIHH", self.data_address(0x20000), len(data), 0, 0)
         self.post(1, [0])
@@ -210,6 +235,7 @@ class Frontend:
         while received < count:
             self.wait(lambda: self.load(q["used"]+2) != q["consumed"])
             available = self.load(q["used"]+2)
+
             heads = []
             while q["consumed"] != available and received < count:
                 head, length = struct.unpack_from("<II", self.mm, self.file_offset + q["used"] + 4 + (q["consumed"] % q["n"])*8)
@@ -225,7 +251,9 @@ class Frontend:
                 received += 1
                 q["consumed"] = (q["consumed"] + 1) & 65535
                 heads.append(head)
+
             self.post(0, heads)
+
         return received
 
     def close(self, success=True):
@@ -237,15 +265,18 @@ class Frontend:
                 self.proc.kill()
                 self.proc.wait()
             self.backend.close()
+
             for fd in self.owned: os.close(fd)
             self.mm.close()
             self.ramfile.close()
+
         self.log.seek(0)
         events = [json.loads(line) for line in self.log if line.strip()]
         self.error.seek(0)
         errors = self.error.read()
         self.log.close()
         self.error.close()
+
         assert (code == 0) == success, errors
         return events, errors
 
@@ -254,11 +285,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--binary", type=Path, default=Path("target/release/examples/vhost_user_net"))
     a = p.parse_args()
+
     binary = a.binary.resolve()
     with tempfile.TemporaryDirectory(prefix="vhost-smoke-") as directory:
         library = str(Path(directory) / "atomics.so")
         subprocess.run(["cc", "-std=c11", "-shared", "-fPIC", "-O2",
                         str(Path(__file__).with_name("vhost-ring-atomics.c")), "-o", library], check=True)
+
         atomics = ctypes.CDLL(library)
         atomics.ring_load.argtypes, atomics.ring_load.restype = [ctypes.c_void_p], ctypes.c_uint16
         atomics.ring_store.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
@@ -274,21 +307,26 @@ def main():
                             reply = f.call(11, struct.pack("=II", index, 0))
                             assert struct.unpack("=II", reply)[0] == index
                             f.setup(index, 65530 if index == 0 else 0)
+
                         if iommu:
                             f.call(22, struct.pack("=QQQBB6x", 0, 2**64-1, 0, 0, 3))
+
                         # Disabled TX must complete and discard, without starting RX.
                         f.prepare_rx()
                         f.call(18, struct.pack("=II", 1, 0))
                         f.start(41, 67)
                         f.service(0.02)
                         assert f.load(f.q[0]["used"]+2) == 65530
+
                         f.call(18, struct.pack("=II", 1, 1))
                         f.start(42, 67)
                         assert f.receive(42, 67) == 67
+
                         # Stop and reconfigure RX at different addresses; no old-ring reuse.
                         old_used = f.q[0]["used"]
                         reply = f.call(11, struct.pack("=II", 0, 0))
                         assert struct.unpack("=II", reply)[1] == f.load(old_used+2)
+
                         f.setup(0, 0, shift=0x6ff0)
                         f.prepare_rx()
                         f.start(43, 13)
@@ -300,11 +338,13 @@ def main():
                         print(f.error.read())
                         f.close(success=False)
                         raise
+
                     events, _ = f.close()
                     summary = events[-1]
                     assert summary["rx_completed"] == 80 and summary["queue_stops"] == 3
                     assert summary["iotlb_updates"] > 0 if iommu else summary["iotlb_updates"] == 0
                     cases += 1
+
         # A descriptor loop must terminate the backend, not hang or touch arbitrary RAM.
         f = Frontend(binary, directory, atomics, False, False)
         try:
@@ -315,6 +355,7 @@ def main():
             pass
         _, error = f.close(success=False)
         assert "cycle" in error, error
+
         print(f"passed {cases} shared-memory/IOTLB/reset cases plus malformed descriptor rejection")
 
 

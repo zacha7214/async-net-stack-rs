@@ -1,6 +1,9 @@
 //! Application-visible AP lifecycle, without 802.11 radio or management frames.
-use super::{FabricStats, Link, Network, SimDevice};
-use std::{io, net::Ipv4Addr, rc::Rc, time::Duration};
+use super::{Bandwidth, Bottleneck, FabricStats, Link, Network, SimDevice};
+use crate::platform::io;
+use crate::platform::net::Ipv4Addr;
+use alloc::rc::Rc;
+use core::time::Duration;
 
 /// An isolated IPv4 broadcast domain owned by an application.
 ///
@@ -48,6 +51,9 @@ impl AccessPoint {
             port.queue.clear();
         }
         state.stats.disconnected_drops += dropped;
+        for serializer in &mut state.bottlenecks {
+            serializer.cancel(|_| true);
+        }
     }
 
     /// Explicit successful association, with no simulated handshake or delay.
@@ -74,6 +80,19 @@ impl AccessPoint {
 
     pub fn set_link(&self, from: &SimDevice, to: &SimDevice, link: Link) -> io::Result<()> {
         self.network.set_link(from, to, link)
+    }
+
+    pub fn bottleneck(&self, config: Bandwidth) -> io::Result<Bottleneck> {
+        self.network.bottleneck(config)
+    }
+
+    pub fn set_bottleneck(
+        &self,
+        from: &SimDevice,
+        to: &SimDevice,
+        bottleneck: Option<&Bottleneck>,
+    ) -> io::Result<()> {
+        self.network.set_bottleneck(from, to, bottleneck)
     }
 
     pub fn advance(&self, elapsed: Duration) -> io::Result<()> {

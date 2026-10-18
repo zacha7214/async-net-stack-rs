@@ -37,29 +37,40 @@ def main():
     p.add_argument('--ssh-port', type=int, default=2222)
     p.add_argument('--timeout', type=int, default=0, help='optional whole-VM time limit in seconds')
     a = p.parse_args()
+
     bundle, qemu, backend = a.bundle.resolve(), a.qemu.resolve(), a.backend.resolve()
     if a.debug and a.accel != 'tcg': p.error('early debug uses --accel tcg')
+
     if a.no_lab_nic and a.mode not in ('shell', 'wifi'):
         p.error('--no-lab-nic supports --mode shell or wifi')
+
     if a.mode == 'wifi' and not a.no_lab_nic:
         p.error('--mode wifi requires --no-lab-nic')
+
     if not 1 <= a.packets <= 1_000_000_000 or not 0 <= a.pps <= 100_000_000:
         p.error('invalid packet count/rate')
+
     if not 1024 <= a.gdb_port <= 65535: p.error('invalid GDB port')
+
     if not a.no_lab_nic and not backend.is_file():
         p.error('build host backend: cargo build --locked --release --example vhost_user_net'
                 ' (or pass --no-lab-nic to boot the kernel without it)')
+
     if not os.access(qemu, os.X_OK): p.error('--qemu is not executable')
     manifest = json.loads((bundle/'manifest.json').read_text())
+
     if a.mode == 'wifi' and 'wifi-hwsim' not in manifest.get('features', []):
         p.error('bundle has no Wi-Fi userspace; rebuild it first')
+
     for name in ('Image', 'initramfs.cpio.gz', 'vmlinux', 'config'):
         digest = hashlib.file_digest((bundle/name).open('rb'), 'sha256').hexdigest()
         if digest != manifest['sha256'][name]: p.error(f'bundle checksum mismatch: {name}')
+
     run = Path(tempfile.mkdtemp(prefix='kernel-lab-', dir='/tmp'))
     print(f'Run logs: {run}', flush=True)
     print(f'Kernel: {manifest["kernel_release"]}', flush=True)
     host_log = host_err = generator = None
+
     if not a.no_lab_nic:
         host_log = (run/'host.jsonl').open('w')
         host_err = (run/'host.log').open('w')
@@ -69,16 +80,20 @@ def main():
     try:
         if generator is not None:
             deadline = time.monotonic()+10
+
             while not (run/'net.sock').exists():
                 if generator.poll() is not None or time.monotonic() > deadline:
                     raise RuntimeError('backend failed; inspect '+str(run/'host.log'))
                 time.sleep(0.02)
+
         cmdline = manifest['cmdline']+f' lab.mode={a.mode} lab.packets={a.packets}'
         boot = ['-kernel', str(bundle/'Image'), '-initrd', str(bundle/'initramfs.cpio.gz'),
                 '-append', cmdline, '-display', 'none',
                 '-serial', 'mon:stdio' if a.mode == 'shell' else 'file:'+str(run/'guest-console.log'),
                 '-no-reboot']
+
         if a.no_lab_nic:
+
             # Plain direct-kernel boot: no shared RAM object and no virtio NIC, so
             # an unpatched qemu-system-aarch64 is enough for kernel-only debugging.
             args = [str(qemu), '-machine', 'virt', '-accel', a.accel,
@@ -89,12 +104,15 @@ def main():
                     '--qemu', str(qemu), '--accel', a.accel, '--socket', str(run/'net.sock'),
                     '--ram-dir', str(run), '--memory-mib', '1024', '--cpus', '1' if a.debug else '2',
                     '--ssh-port', str(a.ssh_port), '--', *boot]
+
         if a.debug:
             args += ['-S', '-gdb', f'tcp:127.0.0.1:{a.gdb_port}']
             print('Paused at reset. In another terminal run:', flush=True)
             print(f'python3 scripts/debug-kernel-lab.py --bundle {bundle} --port {a.gdb_port}', flush=True)
+
         # A separate group makes cancellation stop wrapper and QEMU together.
         vm = subprocess.Popen(args, start_new_session=True)
+
         try:
             code = vm.wait(timeout=a.timeout or None)
         except subprocess.TimeoutExpired:
@@ -103,14 +121,18 @@ def main():
                 raise RuntimeError(f'guest test timed out; inspect {run}/guest-console.log')
             print(f'\nReached --timeout after {a.timeout}s; stopping the VM.', flush=True)
             return
+
         # A debug session usually ends by quitting QEMU, which is not a lab failure.
         if code and not a.debug: raise RuntimeError(f'QEMU exited {code}; inspect {run}')
+
         if a.mode == 'wifi':
             console = (run/'guest-console.log').read_text(errors='replace')
             print(console, flush=True)
+
             if 'KERNEL_LAB_WIFI_RESULT=0' not in console:
                 raise RuntimeError('guest Wi-Fi lab failed; inspect '+str(run/'guest-console.log'))
             return
+
         if a.mode != 'shell':
             console = (run/'guest-console.log').read_text(errors='replace')
             records = []
@@ -130,9 +152,11 @@ def main():
         if vm and vm.poll() is None:
             os.killpg(vm.pid, signal.SIGTERM)
             try: vm.wait(timeout=5)
+
             except subprocess.TimeoutExpired:
                 os.killpg(vm.pid, signal.SIGKILL)
                 vm.wait()
+
         if generator is not None:
             generator.terminate()
             try: generator.wait(timeout=5)

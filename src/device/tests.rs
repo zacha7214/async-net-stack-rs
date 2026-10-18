@@ -1,6 +1,7 @@
 #[allow(unused_imports)]
 use crate::device::buffer_pool::{FramePool, PacketBuf};
 use crate::device::{Device, LoopbackDevice};
+use alloc::{format, vec, vec::Vec};
 
 #[test]
 fn alloc_free_roundtrip_exhausts_and_reuses() {

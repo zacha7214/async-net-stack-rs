@@ -1,11 +1,13 @@
 //! Fixed arenas with exclusive packet handles. A non-atomic `Rc` keeps the
 //! arena and free list alive across device moves and outstanding packets.
-use std::alloc::{self, Layout};
-use std::any::Any;
-use std::cell::Cell;
-use std::fmt;
-use std::ptr::NonNull;
-use std::rc::Rc;
+use alloc::alloc::{self as allocator, Layout};
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::any::Any;
+use core::cell::Cell;
+use core::fmt;
+use core::ptr::NonNull;
 
 #[derive(Clone)]
 pub(crate) struct FramePool(Rc<PoolInner>);
@@ -34,8 +36,8 @@ impl FramePool {
 
         // Safe slice access may expose any byte, including unused capacity.
         // Zero once on construction; no per-packet clearing is necessary.
-        let ptr = unsafe { alloc::alloc_zeroed(layout) };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| alloc::handle_alloc_error(layout));
+        let ptr = unsafe { allocator::alloc_zeroed(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| allocator::handle_alloc_error(layout));
         Self::build(ptr, frame_size, num_frames, Some(layout), None)
     }
 
@@ -222,7 +224,7 @@ impl FramePool {
 impl Drop for PoolInner {
     fn drop(&mut self) {
         if let Some(layout) = self.layout {
-            unsafe { alloc::dealloc(self.ptr.as_ptr(), layout) };
+            unsafe { allocator::dealloc(self.ptr.as_ptr(), layout) };
         }
     }
 }
@@ -255,17 +257,19 @@ impl Default for PacketBuf {
 impl PacketBuf {
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(self.data_offset), self.len) }
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr().add(self.data_offset), self.len) }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity) }
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.capacity) }
     }
 
     #[inline]
     pub fn as_mut_packet(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(self.data_offset), self.len) }
+        unsafe {
+            core::slice::from_raw_parts_mut(self.ptr.as_ptr().add(self.data_offset), self.len)
+        }
     }
 
     pub fn set_headroom(&mut self, headroom: usize) {
@@ -359,5 +363,30 @@ impl fmt::Debug for PacketBuf {
             .field("frame", &self.idx)
             .field("recycled", &self.pool.is_none())
             .finish()
+    }
+}
+
+/// Heap-backed packet arena for portable device implementations. Allocation is
+/// supplied by the application's global allocator; exhaustion returns `None`.
+/// This storage is not automatically DMA-capable or cache coherent.
+#[derive(Clone)]
+pub struct PacketPool(FramePool);
+impl PacketPool {
+    /// Panics for invalid/overflowing layout; allocator failure uses the global
+    /// allocation-error handler. Construction zeroes the arena once.
+    pub fn new(frames: usize, frame_size: usize, alignment: usize) -> Self {
+        Self(FramePool::new(frames, frame_size, alignment))
+    }
+    pub fn alloc(&self) -> Option<PacketBuf> {
+        Some(self.0.packet_buf(self.0.alloc()?, 0))
+    }
+    pub fn alloc_batch(&self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
+        self.0.alloc_batch(max, out)
+    }
+    pub fn available(&self) -> usize {
+        self.0.available()
+    }
+    pub fn frame_size(&self) -> usize {
+        self.0.frame_size()
     }
 }

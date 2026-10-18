@@ -48,21 +48,27 @@ def main():
     p.add_argument('--export-only', action='store_true',
                    help='export the last completed bundle without rebuilding')
     a = p.parse_args()
+
     if not 0 <= a.jobs <= 64:
         p.error('jobs must be 0..64')
+
     # An export needs no kernel tree: it only reads a finished bundle back out.
     builder = lab_builders.from_args(a, source=None if a.export_only else a.source,
                                      need_source=not a.export_only)
     work = a.work or lab_builders.default_work(a.builder)
     source, work = builder.paths(a.source, work)
+
     if not work.startswith('/') or not source.startswith('/'):
         p.error('use absolute paths for --source and --work')
+
     reason = builder.check()
     if reason:
         p.error(reason)
+
     dest = a.output.resolve()
     if dest.exists() and not a.force:
         p.error(f'{dest} already exists; pass --force to replace it or choose another --output')
+
     project = Path(__file__).resolve().parent.parent
     remote = work + '/project'
     print(f'Builder: {builder.describe()}', flush=True)
@@ -82,6 +88,7 @@ def main():
             export_bundle(builder, builder.capture(['cat', work + '/latest-bundle.txt']),
                           dest, a.force)
             return
+
         prepare_source(builder, a, source)
 
         # Refuse unmanaged work directories before unpacking anything into them.
@@ -90,25 +97,30 @@ def main():
                      '"work directory is not owned by this helper"; '
                      'p.mkdir(parents=True,exist_ok=True); (p/".async-net-kernel-lab").touch(); '
                      'shutil.rmtree(p/"project", ignore_errors=True); (p/"project").mkdir()')
+
         builder.run(['python3', '-c', preflight, work], check=True)
         with tempfile.TemporaryFile() as payload:
             with tarfile.open(fileobj=payload, mode='w') as tar:
                 for item in PAYLOAD:
                     tar.add(project / item, arcname=item,
                             filter=lambda x: None if '__pycache__' in x.name else x)
+
             payload.seek(0)
             builder.run(['tar', '-xf', '-', '-C', remote], stdin=payload, check=True)
 
         jobs = a.jobs or min(4, int(builder.capture(['nproc']) or 2))
         command = ['python3', './scripts/build-kernel-lab.py', '--source', source,
                    '--work', work, '--jobs', str(jobs)]
+
         # Run from the copied tree so its relative script path and Cargo.toml resolve.
         script = ('set -o pipefail; export PATH="$HOME/.cargo/bin:$PATH"; cd ' + shlex.quote(remote) +
                   ' && ' + shlex.join(command) + ' 2>&1 | tee ' + shlex.quote(work + '/build.log'))
         print(f'Building in {remote} with -j{jobs}', flush=True)
+
         code, _ = builder.run(['bash', '-lc', script])
         if code:
             raise SystemExit(f'build failed; the full log is {work}/build.log on the builder')
+
         export_bundle(builder, builder.capture(['cat', work + '/latest-bundle.txt']), dest, a.force)
 
 
@@ -116,11 +128,13 @@ def prepare_source(builder, a, source):
     """Make sure a kernel tree is actually present at `source` on the builder."""
     if builder.run(['test', '-f', source + '/Makefile'])[0] == 0:
         return
+
     if not a.clone:
         raise SystemExit(
             f'no kernel tree at {source} on the builder. Point --source at one, or let this '
             'script fetch it:\n'
             '  --clone https://github.com/torvalds/linux.git --clone-ref vX.Y')
+
     print(f'Cloning {a.clone} at {a.clone_ref} into {source} on the builder', flush=True)
     if builder.run(['git', 'clone', '--depth', '1', '--branch', a.clone_ref, a.clone, source])[0]:
         raise SystemExit(f'cloning {a.clone} at {a.clone_ref} failed on the builder')
@@ -129,18 +143,24 @@ def prepare_source(builder, a, source):
 def export_bundle(builder, bundle, dest, force):
     if not bundle:
         raise SystemExit('no completed bundle recorded on the builder; run a build first')
+
     dest.parent.mkdir(parents=True, exist_ok=True)
+
     # Copy into a fresh staging directory, then publish under the chosen name.
     with tempfile.TemporaryDirectory(prefix='.kernel-export-', dir=dest.parent) as name:
         builder.pull(bundle, name)
         stage = Path(name) / Path(bundle).name
+
         if not (stage / 'manifest.json').is_file():
             raise RuntimeError('incomplete bundle transfer')
+
         if dest.exists():
             if not force:
                 raise RuntimeError(f'{dest} appeared during transfer')
+
             shutil.rmtree(dest)
         stage.rename(dest)
+
     print(f'Local bundle: {dest}', flush=True)
     print(f'Next: python3 scripts/qemu-lab.py --bundle {dest}', flush=True)
 
@@ -150,6 +170,7 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         sys.exit(130)
+
     except subprocess.CalledProcessError as failure:
         raise SystemExit(f'command failed with exit status {failure.returncode}: '
                          + ' '.join(map(str, failure.cmd)))

@@ -1,13 +1,11 @@
 //! Checked IPv4/TCP wire format (RFC 9293). Unknown well-formed TCP options are
 //! skipped; MSS is exposed. IPv4 options/fragments and TCP urgent data are not
 //! implemented by the initial connection engine.
+use crate::platform::io;
+use crate::platform::net::{Ipv4Addr, SocketAddrV4};
 use crate::{
     device::PacketBuf,
     net::{checksum, finish_sum, sum_words},
-};
-use std::{
-    io,
-    net::{Ipv4Addr, SocketAddrV4},
 };
 
 pub const FIN: u8 = 0x01;
