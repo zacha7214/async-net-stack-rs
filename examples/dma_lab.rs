@@ -74,7 +74,6 @@ fn run() -> io::Result<()> {
     );
 
     Ok(())
-
 }
 
 #[test]

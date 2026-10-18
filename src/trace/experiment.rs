@@ -122,12 +122,7 @@ pub fn replay(capture: Capture) -> io::Result<Value> {
                     .ok_or_else(|| io::Error::other("unexpected replay packet"))?;
 
                 let matches = coordinator.with_device(|d| {
-                    d.trace()
-                        .packet_bytes(
-                            &d.trace()
-                                .packets()[index]
-                        ) == Some(frame.as_slice()
-                    )
+                    d.trace().packet_bytes(&d.trace().packets()[index]) == Some(frame.as_slice())
                 });
 
                 if !matches {

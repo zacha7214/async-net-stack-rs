@@ -67,10 +67,8 @@ impl State {
         if self.audit.len() == 256 {
             self.audit.pop_front();
         }
-        
-        self
-            .audit
-            .push_back(event);
+
+        self.audit.push_back(event);
     }
 }
 
@@ -114,27 +112,23 @@ pub fn backend(capacity: usize) -> io::Result<(SimMemory, SimEngine, DmaControl)
 
 impl DmaControl {
     pub fn plan(&self, fault: TxFault) -> io::Result<()> {
-        let mut s = self.0
-            .borrow_mut();
-        
+        let mut s = self.0.borrow_mut();
+
         if s.plans.len() == s.limit * 2 {
             return Err(full());
         }
-        
-        s.plans
-            .push_back(fault);
-        
+
+        s.plans.push_back(fault);
+
         Ok(())
     }
 
     pub fn fail_next_mapping(&self) {
-        self.0.borrow_mut()
-            .fail_map = true;
+        self.0.borrow_mut().fail_map = true;
     }
 
     pub fn allow_stop(&self, allow: bool) {
-        self.0.borrow_mut()
-            .allow_stop = allow;
+        self.0.borrow_mut().allow_stop = allow;
     }
 
     /// A live token ends that simulated transfer. Unknown/retired tokens exercise
@@ -144,32 +138,23 @@ impl DmaControl {
         if s.completions.len() == s.limit * 2 {
             return Err(full());
         }
-        
-        s
-            .completions
-            .push((at, completion));
-        
+
+        s.completions.push((at, completion));
+
         Ok(())
     }
 
     pub fn mapped(&self) -> usize {
-        self.0.borrow()
-            .mapped
-            .len()
+        self.0.borrow().mapped.len()
     }
 
     pub fn in_flight(&self) -> usize {
-        self.0.borrow()
-            .active
-            .len()
+        self.0.borrow().active.len()
     }
 
     /// Bounded diagnostic history; oldest records are overwritten after 256 events.
     pub fn take_audit(&self) -> VecDeque<AuditEvent> {
-        mem::take(
-            &mut self.0.borrow_mut()
-            .audit
-        )
+        mem::take(&mut self.0.borrow_mut().audit)
     }
 }
 
@@ -194,14 +179,11 @@ unsafe impl DmaMemory for SimMemory {
         let address = s
             .next_address
             .checked_add(1)
-            .ok_or_else(|| io::Error::other("synthetic address exhausted")
-        )?;
+            .ok_or_else(|| io::Error::other("synthetic address exhausted"))?;
 
         s.next_address = address;
-        s.mapped
-            .insert(address, false);
-        s
-            .record(AuditEvent::Map(address));
+        s.mapped.insert(address, false);
+        s.record(AuditEvent::Map(address));
 
         Ok(SimMapping { address })
     }
@@ -212,11 +194,9 @@ unsafe impl DmaMemory for SimMemory {
 
     unsafe fn sync_for_device(&mut self, mapping: &mut SimMapping) {
         let mut s = self.0.borrow_mut();
-        *s.mapped
-        .get_mut(&mapping.address).unwrap() = true;
-    
-        s
-            .record(AuditEvent::DeviceSync(mapping.address));
+        *s.mapped.get_mut(&mapping.address).unwrap() = true;
+
+        s.record(AuditEvent::DeviceSync(mapping.address));
     }
 
     unsafe fn sync_for_cpu(&mut self, mapping: &mut SimMapping) {
@@ -226,12 +206,9 @@ unsafe impl DmaMemory for SimMemory {
             "reclaim before completion"
         );
 
-        *s
-            .mapped
-            .get_mut(&mapping.address).unwrap() = false;
-        
-        s
-            .record(AuditEvent::CpuSync(mapping.address));
+        *s.mapped.get_mut(&mapping.address).unwrap() = false;
+
+        s.record(AuditEvent::CpuSync(mapping.address));
     }
 
     unsafe fn unmap(&mut self, mapping: SimMapping) {
@@ -242,16 +219,13 @@ unsafe impl DmaMemory for SimMemory {
             "unmap without CPU synchronization"
         );
 
-        s.record(
-            AuditEvent::Unmap(mapping.address)
-        );
+        s.record(AuditEvent::Unmap(mapping.address));
     }
 }
 
 // SAFETY: no hardware accesses occur. Completion removes the simulated live
 // transfer; successful stop removes all live transfers before returning true.
 unsafe impl TxEngine for SimEngine {
-
     unsafe fn submit(&mut self, submission: Submission, now: Duration) -> io::Result<()> {
         let mut s = self.0.borrow_mut();
         if s.stopped {
@@ -298,26 +272,19 @@ unsafe impl TxEngine for SimEngine {
 
         assert_eq!(s.mapped.get(&submission.address.0), Some(&true));
         assert!(!s.active.contains_key(&submission.token));
-        s
-            .record(AuditEvent::Publish(submission.token, submission.address.0));
-        s.active
-            .insert(submission.token, submission);
+        s.record(AuditEvent::Publish(submission.token, submission.address.0));
+        s.active.insert(submission.token, submission);
 
         Ok(())
     }
 
     fn completion(&mut self, now: Duration) -> Option<Completion> {
         let mut s = self.0.borrow_mut();
-        let (
-            index, &(at, 
-            completion)
-        ) = s
-        .completions
-        .iter()
-        .enumerate()
-        .min_by_key(
-            |(_, (at, _))| *at
-        )?;
+        let (index, &(at, completion)) = s
+            .completions
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (at, _))| *at)?;
         if at > now {
             return None;
         }
@@ -330,11 +297,7 @@ unsafe impl TxEngine for SimEngine {
     }
 
     fn next_deadline(&self) -> Option<Duration> {
-        self.0.borrow()
-        .completions
-        .iter()
-        .map(|(at, _)| *at)
-        .min()
+        self.0.borrow().completions.iter().map(|(at, _)| *at).min()
     }
 
     fn stop(&mut self) -> bool {
@@ -342,21 +305,16 @@ unsafe impl TxEngine for SimEngine {
         s.stopped = true;
 
         let allowed = s.allow_stop;
-        s
-            .record(AuditEvent::Stop(allowed));
-        
-        if allowed {
-            s
-            .active
-            .clear();
+        s.record(AuditEvent::Stop(allowed));
 
-            s.completions
-            .clear();
+        if allowed {
+            s.active.clear();
+
+            s.completions.clear();
         }
 
         allowed
     }
-
 }
 
 /// Safely bind the paired synthetic mapper/engine; no hardware DMA is possible.
@@ -368,16 +326,10 @@ pub fn tx_queue(
     crate::device::dma::TxQueue<SimMemory, SimEngine>,
     DmaControl,
 )> {
-    let (
-        memory, 
-        engine,
-        control
-    ) = backend(backend_capacity)?;
-    
+    let (memory, engine, control) = backend(backend_capacity)?;
+
     // SAFETY: both objects share the same synthetic address domain, with no work.
-    let queue = unsafe { 
-        crate::device::dma::TxQueue::new(pool, memory, engine, config)? 
-    };
+    let queue = unsafe { crate::device::dma::TxQueue::new(pool, memory, engine, config)? };
 
     Ok((queue, control))
 }

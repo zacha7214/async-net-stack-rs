@@ -11,11 +11,7 @@ use async_net_stack_rs::{
     transport::udp,
 };
 
-use std::{
-    collections::VecDeque,
-    net::Ipv4Addr,
-    time::Duration
-};
+use std::{collections::VecDeque, net::Ipv4Addr, time::Duration};
 
 const LOCAL: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 20);
 const PEER: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 50);

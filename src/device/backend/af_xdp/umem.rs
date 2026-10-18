@@ -75,9 +75,7 @@ impl Mmap {
 impl Drop for Mmap {
     fn drop(&mut self) {
         // SAFETY: `ptr`/`len` came from a successful mmap in the constructors.
-        unsafe {
-            libc::munmap(self.ptr.as_ptr().cast(), self.len)
-        };
+        unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.len) };
     }
 }
 
@@ -190,11 +188,7 @@ impl Ring {
     pub(crate) fn write_desc64(&self, i: u32, v: u64) {
         debug_assert_eq!(self.desc_size, 8);
         // SAFETY: desc array bounds; published by the producer release.
-        unsafe { *self.desc
-            .add(
-                self.index(i) * 8
-            ).cast::<u64>() = v
-        };
+        unsafe { *self.desc.add(self.index(i) * 8).cast::<u64>() = v };
     }
 
     /// Read an `xdp_desc` (RX/TX rings).
@@ -214,10 +208,7 @@ impl Ring {
 
         // SAFETY: desc array bounds; published by the producer release.
         unsafe {
-            *self.desc
-                .add(self.index(i) * 16)
-                .cast::<XdpDesc>()
-                = XdpDesc {
+            *self.desc.add(self.index(i) * 16).cast::<XdpDesc>() = XdpDesc {
                 addr,
                 len,
                 options: 0,
@@ -278,13 +269,7 @@ impl UMem {
             ));
         }
 
-        let fd = unsafe {
-            libc::socket(
-                AF_XDP,
-                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-                0
-            )
-        };
+        let fd = unsafe { libc::socket(AF_XDP, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
 
         if fd < 0 {
             return Err(io::Error::last_os_error())
@@ -311,33 +296,25 @@ impl UMem {
         };
 
         set_sockopt(fd.as_raw_fd(), XDP_UMEM_REG, &reg)
-            .map_err(
-                |e| io::Error::other(format!("setsockopt XDP_UMEM_REG: {e}"))
-            )?;
+            .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_REG: {e}")))?;
 
         set_sockopt(
             fd.as_raw_fd(),
             XDP_UMEM_FILL_RING,
             &(fill_entries as libc::c_int),
         )
-        .map_err(
-            |e| io::Error::other(format!("setsockopt XDP_UMEM_FILL_RING: {e}"))
-        )?;
+        .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_FILL_RING: {e}")))?;
 
         set_sockopt(
             fd.as_raw_fd(),
             XDP_UMEM_COMPLETION_RING,
             &(cq_entries as libc::c_int),
         )
-        .map_err(
-            |e| io::Error::other(format!("setsockopt XDP_UMEM_COMPLETION_RING: {e}"))
-        )?;
+        .map_err(|e| io::Error::other(format!("setsockopt XDP_UMEM_COMPLETION_RING: {e}")))?;
 
         let mut offs = XdpMmapOffsets::default();
         get_sockopt(fd.as_raw_fd(), XDP_MMAP_OFFSETS, &mut offs)
-            .map_err(
-                |e| io::Error::other(format!("getsockopt XDP_MMAP_OFFSETS: {e}"))
-            )?;
+            .map_err(|e| io::Error::other(format!("getsockopt XDP_MMAP_OFFSETS: {e}")))?;
 
         let fq = Ring::new(
             fd.as_raw_fd(),
@@ -346,9 +323,7 @@ impl UMem {
             fill_entries,
             8,
         )
-        .map_err(
-            |e| io::Error::other(format!("fill ring mmap: {e}"))
-        )?;
+        .map_err(|e| io::Error::other(format!("fill ring mmap: {e}")))?;
 
         let cq = Ring::new(
             fd.as_raw_fd(),
@@ -357,9 +332,7 @@ impl UMem {
             cq_entries,
             8,
         )
-        .map_err(
-            |e| io::Error::other(format!("completion ring mmap: {e}"))
-        )?;
+        .map_err(|e| io::Error::other(format!("completion ring mmap: {e}")))?;
 
         Ok(Self {
             _fd: Rc::new(fd),
@@ -409,8 +382,7 @@ impl UMem {
     }
 
     pub(crate) fn fill_needs_wakeup(&self) -> bool {
-        self.fq
-            .flags_load() & XDP_RING_NEED_WAKEUP != 0
+        self.fq.flags_load() & XDP_RING_NEED_WAKEUP != 0
     }
 
     /// Push frame addresses onto the fill ring; returns how many fit.
@@ -432,27 +404,19 @@ impl UMem {
 
     /// Pop up to `max` completed TX descriptors from the completion ring.
     pub(crate) fn cq_pop(&mut self, out: &mut Vec<u64>, max: usize) -> usize {
-        let prod = self
-            .cq
-            .producer_load();
+        let prod = self.cq.producer_load();
 
         let mut n = 0;
         while self.cached_cq_consumer != prod && n < max {
-            out
-                .push(
-                    self.cq.desc64(self.cached_cq_consumer)
-                );
+            out.push(self.cq.desc64(self.cached_cq_consumer));
 
-            self.cached_cq_consumer = self
-                .cached_cq_consumer
-                .wrapping_add(1);
+            self.cached_cq_consumer = self.cached_cq_consumer.wrapping_add(1);
 
             n += 1;
         }
 
         if n > 0 {
-            self.cq
-                .consumer_store(self.cached_cq_consumer);
+            self.cq.consumer_store(self.cached_cq_consumer);
         }
 
         n

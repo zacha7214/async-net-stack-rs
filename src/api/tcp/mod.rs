@@ -517,24 +517,22 @@ impl<D: Device> TcpPool<D> {
         if now < self.now {
             return Err(invalid("time went backwards"));
         }
-        
+
         self.now = now;
         for c in self.connections.values_mut() {
             c.tick(now, &self.config);
         }
-        
+
         self.report_states();
         self.connections
-            .retain(
-                |_, c| c.accepted || !c.state.is_terminal()
-            );
-        
+            .retain(|_, c| c.accepted || !c.state.is_terminal());
+
         self.device.poll_at(now)?;
         self.device.recv(budget, &mut self.rx)?;
-        
+
         let mut rx = core::mem::take(&mut self.rx);
         let count = rx.len();
-        
+
         // Restore/recycle scratch packets even if accepting a SYN cannot obtain entropy.
         let result = (|| {
             for frame in rx.drain(..) {
@@ -543,7 +541,7 @@ impl<D: Device> TcpPool<D> {
                     self.stats.ignored += 1;
                     continue;
                 }
-                
+
                 match tcp::parse_ipv4(bytes) {
                     Ok(segment) => {
                         self.stats.received += 1;
@@ -552,15 +550,14 @@ impl<D: Device> TcpPool<D> {
                     Err(_) => self.stats.malformed += 1,
                 }
             }
-            
+
             Ok::<(), io::Error>(())
-            
         })();
 
         rx.clear();
         self.rx = rx;
         result?;
-        
+
         self.flush_reset()?;
         for connection in self.connections.values_mut() {
             for _ in 0..self.config.tx_burst {
@@ -672,8 +669,7 @@ impl<D: Device> TcpPool<D> {
                 id,
                 Connection::passive(segment, sequence, self.now, &self.config),
             );
-        } 
-        else {
+        } else {
             self.queue_reset(if segment.flags & ACK != 0 {
                 Reset {
                     local: segment.destination,
@@ -682,8 +678,7 @@ impl<D: Device> TcpPool<D> {
                     acknowledgment: 0,
                     flags: RST,
                 }
-            } 
-            else {
+            } else {
                 Reset {
                     local: segment.destination,
                     remote: segment.source,
@@ -700,8 +695,7 @@ impl<D: Device> TcpPool<D> {
     fn queue_reset(&mut self, reset: Reset) {
         if self.resets.len() == self.config.control_capacity {
             self.stats.control_drops += 1;
-        } 
-        else {
+        } else {
             self.resets.push_back(reset);
         }
     }
@@ -765,8 +759,7 @@ fn validate_address(address: SocketAddrV4) -> io::Result<()> {
         || address.ip().is_multicast()
     {
         Err(invalid("TCP needs a unicast IP and nonzero port"))
-    } 
-    else {
+    } else {
         Ok(())
     }
 }

@@ -41,7 +41,7 @@ fn bench_alloc_recycle(c: &mut Criterion) {
             bufs.clear();
         });
     });
-    
+
     group.finish();
 }
 

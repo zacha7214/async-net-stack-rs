@@ -32,7 +32,7 @@ fn packet(d: &mut SimDevice, target: Ipv4Addr) -> PacketBuf {
     )
     .unwrap();
     assert_eq!(f.len(), 100);
-    
+
     f
 }
 
@@ -60,11 +60,8 @@ fn shared_fifo_serialization_and_ownership() {
     let mut tx = [packet(&mut a, ip(3))];
     let pointer = tx[0].as_slice().as_ptr();
     a.send(&mut tx).unwrap();
-    
-    let mut tx = [
-        packet(&mut b, ip(3)),
-        packet(&mut b, ip(3))
-    ];
+
+    let mut tx = [packet(&mut b, ip(3)), packet(&mut b, ip(3))];
     assert_eq!(b.send(&mut tx).unwrap(), 2);
     assert!(tx.iter().all(PacketBuf::is_empty));
     assert_eq!(net.stats().bandwidth_drops, 1);
@@ -75,9 +72,7 @@ fn shared_fifo_serialization_and_ownership() {
     );
 
     assert_eq!(c.next_deadline(), Some(Duration::from_millis(110)));
-    net.advance(
-        Duration::from_millis(100)
-    ).unwrap();
+    net.advance(Duration::from_millis(100)).unwrap();
     assert_eq!(
         bottleneck.stats().queued_bytes,
         100,
@@ -93,10 +88,8 @@ fn shared_fifo_serialization_and_ownership() {
         pointer,
         "unicast remains zero-copy"
     );
-    
-    net.advance(
-        Duration::from_millis(90)
-    ).unwrap();
+
+    net.advance(Duration::from_millis(90)).unwrap();
     assert_eq!(c.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(bottleneck.stats().queued_bytes, 0);
 }
@@ -128,7 +121,6 @@ fn rounding_overhead_and_overflow_are_explicit() {
         ..config(10)
     })
     .is_none());
-
 }
 
 #[test]
@@ -167,7 +159,6 @@ fn faults_do_not_reserve_service_and_reconfiguration_preserves_deadlines() {
     assert_eq!(b.next_deadline(), Some(Duration::from_millis(100)));
     let other = Network::default().bottleneck(config(100)).unwrap();
     assert!(net.set_bottleneck(&a, &b, Some(&other)).is_err());
-
 }
 
 #[test]
@@ -204,12 +195,12 @@ fn shaped_receiver_overflow_is_consumed_but_unshaped_backpressures() {
     let b = net.port(&[ip(2)], 8, 1).unwrap();
     let bw = net.bottleneck(config(400)).unwrap();
     net.set_bottleneck(&a, &b, Some(&bw)).unwrap();
-    
+
     let mut tx = [packet(&mut a, ip(2)), packet(&mut a, ip(2))];
     assert_eq!(a.send(&mut tx).unwrap(), 2);
     assert_eq!(net.stats().queue_drops, 1);
     assert_eq!(bw.stats().admitted, 1);
-    
+
     net.set_bottleneck(&a, &b, None).unwrap();
     let mut tx = [packet(&mut a, ip(2))];
     assert_eq!(a.send(&mut tx).unwrap(), 0);
@@ -234,14 +225,14 @@ fn broadcast_shares_service_and_delay_can_reorder_after_serialization() {
         },
     )
     .unwrap();
-    
+
     let mut tx = [packet(&mut a, Ipv4Addr::BROADCAST)];
     a.send(&mut tx).unwrap();
     assert_eq!(b.next_deadline(), Some(Duration::from_millis(600)));
     assert_eq!(c.next_deadline(), Some(Duration::from_millis(200)));
     net.advance(Duration::from_millis(200)).unwrap();
     net.set_link(&a, &b, Link::default()).unwrap();
-    
+
     let mut tx = [packet(&mut a, ip(2))];
     a.send(&mut tx).unwrap();
     assert_eq!(b.next_deadline(), Some(Duration::from_millis(300)));
@@ -252,21 +243,15 @@ fn broadcast_shares_service_and_delay_can_reorder_after_serialization() {
 #[test]
 fn cancellation_preserves_other_flows_and_overflow_does_not_reserve() {
     let mut s = Serializer::new(config(300)).unwrap();
-    s
-        .admit(Duration::ZERO, 100, Duration::ZERO, 1).unwrap();
-    s
-        .admit(Duration::ZERO, 100, Duration::ZERO, 2).unwrap();
-    s
-        .cancel(|owner| *owner == 1);
+    s.admit(Duration::ZERO, 100, Duration::ZERO, 1).unwrap();
+    s.admit(Duration::ZERO, 100, Duration::ZERO, 2).unwrap();
+    s.cancel(|owner| *owner == 1);
     assert_eq!(s.stats().queued_bytes, 100);
     assert_eq!(
-        s
-            .admit(
-                Duration::ZERO, 100, Duration::ZERO, 3
-            ),
+        s.admit(Duration::ZERO, 100, Duration::ZERO, 3),
         Ok(Duration::from_millis(300))
     );
-    
+
     let net = Network::default();
     let mut a = net.port(&[ip(1)], 8, 8).unwrap();
     let b = net.port(&[ip(2)], 8, 8).unwrap();
@@ -281,7 +266,7 @@ fn cancellation_preserves_other_flows_and_overflow_does_not_reserve() {
         },
     )
     .unwrap();
-    
+
     let mut tx = [packet(&mut a, ip(2))];
     assert_eq!(a.send(&mut tx).unwrap(), 1);
     assert!(tx[0].is_empty());

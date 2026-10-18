@@ -12,9 +12,8 @@ use crate::device::{Device, PacketBuf};
 #[ignore = "requires a dedicated Linux test interface and capabilities"]
 fn umem_and_socket_on_test_iface() {
     let ifname =
-        std::env::var("XDP_TEST_IFACE")
-            .expect("set XDP_TEST_IFACE to an isolated interface");
-    
+        std::env::var("XDP_TEST_IFACE").expect("set XDP_TEST_IFACE to an isolated interface");
+
     let cifname = std::ffi::CString::new(ifname.as_str()).unwrap();
     let ifindex = unsafe { libc::if_nametoindex(cifname.as_ptr()) };
     assert_ne!(ifindex, 0, "no such interface: {ifname}");
@@ -69,7 +68,7 @@ fn xdp_device_rx_on_test_iface() {
         attach_generic: true,
         ..XdpConfig::default()
     };
-    
+
     let mut dev = XdpDevice::with_config(&ifname, 0, &cfg).expect("XdpDevice::with_config");
     eprintln!(
         "attach: {:?}, bind flags: 0x{:x}, need-wakeup: {}",
@@ -87,18 +86,14 @@ fn xdp_device_rx_on_test_iface() {
         if n > 0 {
             bufs.clear();
         }
-        
+
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    let (cfp, fp, fc, d0, d1, d2) = dev
-        .debug_umem()
-        .debug_fill_state();
-    
-    let (rxc, rxp, rxn) = dev
-        .debug_socket()
-        .debug_rx_state();
-    
+    let (cfp, fp, fc, d0, d1, d2) = dev.debug_umem().debug_fill_state();
+
+    let (rxc, rxp, rxn) = dev.debug_socket().debug_rx_state();
+
     eprintln!(
         "fill: cached_prod={cfp} prod={fp} cons={fc} descs=[{d0:#x}, {d1:#x}, {d2:#x}]; \
          rx: cached_cons={rxc} prod={rxp} cons={rxn}"
@@ -107,7 +102,7 @@ fn xdp_device_rx_on_test_iface() {
     let stats = dev.stats().expect("XDP_STATISTICS");
     eprintln!("received {total} packets; stats: {stats:?}");
     assert!(total > 0, "no packets were redirected to the socket");
-    
+
     drop(dev);
 }
 
@@ -130,8 +125,7 @@ fn xdp_device_rx_with_c_prog() {
         attach: false,
         ..XdpConfig::default()
     };
-    let mut dev = XdpDevice::with_config(&ifname, 0, &cfg)
-        .expect("XdpDevice::with_config");
+    let mut dev = XdpDevice::with_config(&ifname, 0, &cfg).expect("XdpDevice::with_config");
 
     // Inject the socket into this device's own XSKMAP (the attached program
     // redirects there).
@@ -144,22 +138,19 @@ fn xdp_device_rx_with_c_prog() {
     let mut total = 0usize;
     let mut bufs: Vec<PacketBuf> = Vec::with_capacity(64);
     while std::time::Instant::now() < deadline {
-        let n = dev.recv(64, &mut bufs)
-            .expect("recv");
-        
+        let n = dev.recv(64, &mut bufs).expect("recv");
+
         total += n;
         if n > 0 {
             bufs.clear();
         }
-        
-        std::thread::sleep(
-            std::time::Duration::from_millis(20)
-        );
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
     let stats = dev.stats().expect("XDP_STATISTICS");
     eprintln!("received {total} packets; stats: {stats:?}");
     assert!(total > 0, "no packets were redirected to the socket");
-    
+
     drop(dev);
 }

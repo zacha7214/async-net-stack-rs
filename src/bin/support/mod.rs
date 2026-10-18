@@ -304,11 +304,7 @@ impl Collector<'_> {
             for line in text.lines() {
                 if let Some((key, value)) = line.trim().split_once(':') {
                     if let Ok(n) = value.trim().parse::<u64>() {
-                        driver
-                            .insert(
-                                key.trim().into(),
-                                json!(n)
-                            );
+                        driver.insert(key.trim().into(), json!(n));
                     }
                 }
             }
@@ -439,13 +435,7 @@ fn collect_inner(config: Config, tool_root: Option<&Path>) -> io::Result<PathBuf
         // Opening the output in the parent avoids tcpdump's privilege drop needing
         // directory write permission. tcpdump -w - writes pcap to this descriptor.
         let mut command = Command::new(
-            tool_root
-                .map_or_else(
-                    || 
-                        PathBuf::from("tcpdump"), 
-                    |root| 
-                        root.join("tcpdump")
-                ),
+            tool_root.map_or_else(|| PathBuf::from("tcpdump"), |root| root.join("tcpdump")),
         );
 
         command
@@ -614,7 +604,7 @@ fn collect_inner(config: Config, tool_root: Option<&Path>) -> io::Result<PathBuf
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    
+
     #[test]
     fn fixture_collector_finalizes_and_failed_capture_never_becomes_latest() {
         let root = std::env::temp_dir().join(format!(

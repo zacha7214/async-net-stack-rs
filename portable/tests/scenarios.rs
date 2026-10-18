@@ -25,7 +25,7 @@ fn portable_tcp_requires_explicit_entropy() {
         device::LoopbackDevice,
         platform::io,
     };
-    
+
     assert!(
         matches!(TcpPool::new(LoopbackDevice::new(), TcpConfig::default()),
         Err(e) if e.kind() == io::ErrorKind::Unsupported.into())
@@ -35,25 +35,23 @@ fn portable_tcp_requires_explicit_entropy() {
 #[test]
 fn packet_arena_ownership_survives_pool_drop() {
     use async_net_stack_core::device::PacketPool;
-    
+
     let pool = PacketPool::new(1, 256, 64);
-    
+
     let mut packet = pool.alloc().unwrap();
     assert!(pool.alloc().is_none());
-    
+
     packet.set_len(3);
     packet.as_mut_packet().copy_from_slice(b"abc");
-    
+
     let retained = pool.clone();
     drop(pool);
     assert_eq!(packet.as_slice(), b"abc");
     drop(packet);
     assert_eq!(retained.available(), 1);
-    
-    let packet = retained
-        .alloc()
-        .unwrap();
-    
+
+    let packet = retained.alloc().unwrap();
+
     drop(retained);
     assert_eq!(packet.capacity(), 256);
 }

@@ -83,10 +83,10 @@ pub(super) fn prepend(frame: &mut PacketBuf, source: [u8; 6], destination: [u8; 
         destination,
         source,
         ether_type: kind,
-    }.encode();
-    
-    frame
-        .push_header(&header);
+    }
+    .encode();
+
+    frame.push_header(&header);
 
     let len = frame.len();
     if len < 60 {

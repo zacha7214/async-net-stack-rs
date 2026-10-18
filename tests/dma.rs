@@ -26,7 +26,7 @@ fn queue(frames: usize, slots: usize, descriptors: usize) -> (Queue, PacketPool,
         )
     }
     .unwrap();
-    
+
     (queue, pool, control)
 }
 
@@ -49,13 +49,13 @@ fn complete(delay: u64) -> TxFault {
 fn delayed_completion_pins_payload_and_orders_cache_hooks() {
     let (mut queue, pool, control) = queue(1, 1, 1);
     control.plan(complete(10)).unwrap();
-    
+
     let mut tx = [frame(&pool, b"retained")];
     assert_eq!(queue.send(&mut tx).unwrap(), 1);
     assert!(tx[0].is_empty());
     assert!(pool.alloc().is_none());
     assert_eq!(queue.next_deadline(), Some(Duration::from_millis(10)));
-    
+
     queue.poll_at(Duration::from_millis(9)).unwrap();
     assert_eq!(queue.pending(), 1);
     queue.poll_at(Duration::from_millis(10)).unwrap();
@@ -80,14 +80,14 @@ fn partial_submission_and_mapping_failures_preserve_suffix() {
     let (mut queue, pool, control) = queue(3, 3, 3);
     control.plan(TxFault::Hold).unwrap();
     control.plan(TxFault::Reject).unwrap();
-    
+
     let mut tx = [frame(&pool, b"a"), frame(&pool, b"b"), frame(&pool, b"c")];
     let pointer = tx[1].as_slice().as_ptr();
     assert_eq!(queue.send(&mut tx).unwrap(), 1);
     assert_eq!(tx[1].as_slice(), b"b");
     assert_eq!(tx[1].as_slice().as_ptr(), pointer);
     assert_eq!(control.mapped(), 1, "rejected descriptor was unmapped");
-    
+
     control.fail_next_mapping();
     assert_eq!(
         queue.send(&mut tx[1..]).unwrap_err().kind(),
@@ -110,7 +110,7 @@ fn reordered_failed_and_duplicate_completions_do_not_recycle_twice() {
             duplicate: true,
         })
         .unwrap();
-    
+
     let mut tx = [frame(&pool, b"a"), frame(&pool, b"b")];
     queue.send(&mut tx).unwrap();
     queue.poll_at(Duration::from_millis(5)).unwrap();
@@ -118,7 +118,7 @@ fn reordered_failed_and_duplicate_completions_do_not_recycle_twice() {
     assert_eq!(pool.available(), 1);
     assert_eq!(queue.stats().completion_errors, 1);
     assert_eq!(queue.stats().stale_completions, 1);
-    
+
     // Reuse the freed slot, but never its completion token.
     control.plan(TxFault::Hold).unwrap();
     queue.send(&mut [frame(&pool, b"c")]).unwrap();
@@ -131,15 +131,12 @@ fn reordered_failed_and_duplicate_completions_do_not_recycle_twice() {
             },
         )
         .unwrap();
-    
+
     queue.poll_at(Duration::from_millis(6)).unwrap();
     assert_eq!(pool.available(), 0);
     assert_eq!(queue.pending(), 2);
-    
-    queue
-        .poll_at(
-            Duration::from_millis(20)
-        ).unwrap();
+
+    queue.poll_at(Duration::from_millis(20)).unwrap();
     assert_eq!(queue.pending(), 1);
     assert_eq!(queue.stats().stale_completions, 2);
     assert!(queue.shutdown());
@@ -162,7 +159,7 @@ fn lost_completion_requires_quiescence_and_stop_can_be_retried() {
         queue.send(&mut empty).unwrap_err().kind(),
         io::ErrorKind::NotConnected.into()
     );
-    
+
     assert!(queue.alloc().is_none());
     control.allow_stop(true);
     assert!(queue.shutdown());
@@ -192,13 +189,13 @@ fn uncertain_drop_quarantines_instead_of_freeing_dma_memory() {
 fn descriptor_pressure_uses_prefix_contract_and_stop_reclaims() {
     let (mut queue, pool, control) = queue(3, 1, 3);
     control.plan(TxFault::Hold).unwrap();
-    
+
     let mut tx = [frame(&pool, b"a"), frame(&pool, b"b")];
     assert_eq!(queue.send(&mut tx).unwrap(), 1);
     assert_eq!(queue.send(&mut tx[1..]).unwrap(), 0);
     assert_eq!(tx[1].as_slice(), b"b");
     drop(queue);
-    
+
     assert_eq!(pool.available(), 2);
     assert_eq!(control.mapped(), 0);
 }
@@ -223,9 +220,8 @@ fn event_and_completion_budgets_are_bounded_and_clock_is_monotonic() {
     queue
         .send(&mut [frame(&pool, b"a"), frame(&pool, b"b")])
         .unwrap();
-    
-    queue
-        .poll_at(Duration::from_millis(1)).unwrap();
+
+    queue.poll_at(Duration::from_millis(1)).unwrap();
     assert_eq!(queue.pending(), 1);
     assert_eq!(
         queue.pop_event(),
@@ -234,7 +230,7 @@ fn event_and_completion_budgets_are_bounded_and_clock_is_monotonic() {
             failed: false
         }))
     );
-    
+
     assert_eq!(queue.stats().event_overflow, 2);
     assert!(queue.poll_at(Duration::ZERO).is_err());
     assert_eq!(queue.pending(), 1);
@@ -264,7 +260,7 @@ fn rejection_before_any_acceptance_consumes_nothing() {
         queue.send(&mut tx).unwrap_err().kind(),
         io::ErrorKind::WouldBlock.into()
     );
-    
+
     assert_eq!(tx[0].as_slice().as_ptr(), pointer);
     assert_eq!(control.mapped(), 0);
     assert_eq!(queue.pending(), 0);

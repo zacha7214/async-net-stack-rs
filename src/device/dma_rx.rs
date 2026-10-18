@@ -32,20 +32,20 @@ pub struct RxCompletion {
 /// must not panic or initiate DMA. No CPU payload access while device-owned.
 pub unsafe trait RxDmaMemory {
     type Mapping;
-    
+
     /// # Safety
     /// Caller retains exclusive storage until DMA is quiescent and unmapped.
     unsafe fn map(&mut self, packet: &mut PacketBuf) -> io::Result<Self::Mapping>;
     fn address(&self, mapping: &Self::Mapping) -> DmaAddress;
-    
+
     /// # Safety
     /// Live mapping, not yet published to hardware.
     unsafe fn sync_for_device(&mut self, mapping: &mut Self::Mapping);
-    
+
     /// # Safety
     /// Live mapping; all device accesses have ended.
     unsafe fn sync_for_cpu(&mut self, mapping: &mut Self::Mapping);
-    
+
     /// # Safety
     /// DMA is quiescent and CPU synchronization has completed.
     unsafe fn unmap(&mut self, mapping: Self::Mapping);
@@ -66,13 +66,13 @@ pub unsafe trait RxEngine {
     /// Range is mapped, synchronized and exclusively retained until completion
     /// or confirmed stop. No further posts are allowed after calling stop.
     unsafe fn post(&mut self, submission: RxSubmission, now: Duration) -> io::Result<()>;
-    
+
     fn completion(&mut self, now: Duration) -> Option<RxCompletion>;
-    
+
     fn next_deadline(&self) -> Option<Duration> {
         None
     }
-    
+
     fn stop(&mut self) -> bool;
 }
 
@@ -151,7 +151,7 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
                 "zero RX capacity/budget",
             ));
         }
-        
+
         Ok(Self {
             resources: Some(Resources {
                 memory,
@@ -168,11 +168,11 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
             stats: RxStats::default(),
         })
     }
-    
+
     pub fn stats(&self) -> RxStats {
         self.stats
     }
-    
+
     pub fn pending(&self) -> usize {
         self.resources
             .as_ref()
@@ -182,17 +182,17 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
             .filter(|f| f.is_some())
             .count()
     }
-    
+
     pub fn ready(&self) -> usize {
         self.ready.len()
     }
-    
+
     /// Accept a prefix of empty buffers, preserving headroom. Accepted handles
     /// become empty placeholders; errors consume nothing. A later failure after
     /// partial acceptance returns the count and records the failure in stats.
     pub fn post(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         let mut accepted = 0;
-        
+
         for frame in frames {
             match self.post_one(frame) {
                 Ok(true) => accepted += 1,
@@ -201,10 +201,10 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
                 Err(e) => return Err(e),
             }
         }
-        
+
         Ok(accepted)
     }
-    
+
     fn post_one(&mut self, frame: &mut PacketBuf) -> io::Result<bool> {
         if self.stopped {
             return Err(io::Error::new(
@@ -212,37 +212,30 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
                 "RX queue stopped",
             ));
         }
-        
+
         if self.pending() + self.ready.len() == self.config.slots {
             return Ok(false);
         }
-        
+
         if !frame.is_empty() || frame.tail_capacity() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "RX requires empty writable buffer",
             ));
         }
-        
+
         let token = self
             .next_token
             .checked_add(1)
             .ok_or_else(|| io::Error::other("RX tokens exhausted"))?;
-        
+
         self.next_token = token;
-        let capacity = frame
-            .tail_capacity();
-        
-        let resource = self
-            .resources
-            .as_mut()
-            .unwrap();
-        
-        let index = resource
-            .flights
-            .iter()
-            .position(Option::is_none).unwrap();
-        
+        let capacity = frame.tail_capacity();
+
+        let resource = self.resources.as_mut().unwrap();
+
+        let index = resource.flights.iter().position(Option::is_none).unwrap();
+
         // SAFETY: exclusive buffer retained through completion or confirmed stop.
         let mut mapping = match unsafe { resource.memory.map(frame) } {
             Ok(m) => m,
@@ -251,33 +244,26 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
                 return Err(e);
             }
         };
-        
+
         // SAFETY: mapping is live and has not been published.
         unsafe {
-            resource.memory
-                .sync_for_device(&mut mapping);
+            resource.memory.sync_for_device(&mut mapping);
         }
-        
+
         let submission = RxSubmission {
             token,
             address: resource.memory.address(&mapping),
             capacity,
         };
-        
+
         // SAFETY: successful post retains mapping and packet privately.
-        if let Err(e) = unsafe { 
-            resource
-                .engine
-                .post(submission, self.now) 
-        } {
+        if let Err(e) = unsafe { resource.engine.post(submission, self.now) } {
             // SAFETY: post failure guarantees no device access.
             unsafe {
-                resource.memory
-                    .sync_for_cpu(&mut mapping);
-                resource.memory
-                    .unmap(mapping);
+                resource.memory.sync_for_cpu(&mut mapping);
+                resource.memory.unmap(mapping);
             }
-            
+
             self.stats.posting_errors += 1;
             return Err(e);
         }
@@ -288,65 +274,52 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
             mapping,
             packet: mem::take(frame),
         });
-        
+
         self.stats.posted += 1;
         Ok(true)
     }
-    
+
     fn progress(&mut self) {
         if self.quiesced {
             return;
         }
-        
+
         for _ in 0..self.config.completion_budget {
-            let resource = self.resources
-                .as_mut()
-                .unwrap();
-            
+            let resource = self.resources.as_mut().unwrap();
+
             let Some(c) = resource.engine.completion(self.now) else {
                 break;
             };
-            
+
             let Some(index) = resource
                 .flights
                 .iter()
-                .position(
-                    |f| f.as_ref().
-                        is_some_and(
-                            |f| f.token == c.token
-                        )
-                )
+                .position(|f| f.as_ref().is_some_and(|f| f.token == c.token))
             else {
                 self.stats.stale_completions += 1;
                 continue;
             };
-            
-            let mut f = resource.flights[index]
-                .take()
-                .unwrap();
-            
+
+            let mut f = resource.flights[index].take().unwrap();
+
             // SAFETY: matching completion guarantees quiescence even on error.
             unsafe {
-                resource.memory
-                    .sync_for_cpu(&mut f.mapping);
-                resource.memory
-                    .unmap(f.mapping);
+                resource.memory.sync_for_cpu(&mut f.mapping);
+                resource.memory.unmap(f.mapping);
             }
             self.stats.completed += 1;
-            
+
             let valid = c.length > 0 && c.length <= f.capacity;
             self.stats.invalid_lengths += u64::from(!valid);
             self.stats.completion_errors += u64::from(c.failed);
             if valid && !c.failed {
                 // Validate before set_len or exposing any received bytes.
-                f.packet
-                    .set_len(c.length);
-                self.ready
-                    .push_back(f.packet);
+                f.packet.set_len(c.length);
+                self.ready.push_back(f.packet);
             }
         }
     }
-    
+
     /// Stop posting permanently. Ready packets remain available to recv.
     /// False retains posted ownership; polling and retrying shutdown remain legal.
     pub fn shutdown(&mut self) -> bool {
@@ -354,27 +327,25 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
         if self.quiesced {
             return true;
         }
-        
+
         let resource = self.resources.as_mut().unwrap();
         if !resource.engine.stop() {
             return false;
         }
-        
+
         self.quiesced = true;
         for slot in &mut resource.flights {
             if let Some(mut f) = slot.take() {
                 // SAFETY: stop confirmed all accesses have ended.
                 unsafe {
-                    resource.memory
-                        .sync_for_cpu(&mut f.mapping);
-                    resource.memory.
-                        unmap(f.mapping);
+                    resource.memory.sync_for_cpu(&mut f.mapping);
+                    resource.memory.unmap(f.mapping);
                 }
-                
+
                 self.stats.cancelled += 1;
             }
         }
-        
+
         true
     }
 }
@@ -383,25 +354,23 @@ impl<M: RxDmaMemory, E: RxEngine> Device for RxQueue<M, E> {
     fn alloc(&mut self) -> Option<PacketBuf> {
         if self.stopped {
             None
-        } 
-        else {
+        } else {
             self.pool.alloc()
         }
     }
-    
+
     fn frame_size(&self) -> usize {
         self.pool.frame_size()
     }
-    
+
     fn next_deadline(&self) -> Option<Duration> {
         if self.quiesced {
             None
-        } 
-        else {
+        } else {
             self.resources.as_ref().unwrap().engine.next_deadline()
         }
     }
-    
+
     fn poll_at(&mut self, now: Duration) -> io::Result<()> {
         if now < self.now {
             return Err(io::Error::new(
@@ -409,30 +378,28 @@ impl<M: RxDmaMemory, E: RxEngine> Device for RxQueue<M, E> {
                 "RX clock moved backwards",
             ));
         }
-        
+
         self.now = now;
-        self
-            .progress();
-        
+        self.progress();
+
         Ok(())
     }
-    
+
     fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> io::Result<usize> {
         out.clear();
         if max == 0 {
             return Ok(0);
         }
-        
-        self
-            .progress();
+
+        self.progress();
         for _ in 0..max.min(self.ready.len()) {
             out.push(self.ready.pop_front().unwrap());
         }
-        
+
         self.stats.delivered += out.len() as u64;
         Ok(out.len())
     }
-    
+
     fn send(&mut self, frames: &mut [PacketBuf]) -> io::Result<usize> {
         if frames.is_empty() {
             Ok(0)
@@ -448,10 +415,7 @@ impl<M: RxDmaMemory, E: RxEngine> Device for RxQueue<M, E> {
 impl<M: RxDmaMemory, E: RxEngine> Drop for RxQueue<M, E> {
     fn drop(&mut self) {
         if !self.shutdown() {
-            mem::forget(
-                self.resources
-                .take()
-            );
+            mem::forget(self.resources.take());
         }
     }
 }

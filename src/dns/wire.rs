@@ -30,9 +30,8 @@ pub fn query(id: u16, name: &str) -> Vec<u8> {
         out.push(label.len() as u8);
         out.extend_from_slice(label.as_bytes());
     }
-    out
-        .extend_from_slice(&[0, 0, 1, 0, 1]);
-    
+    out.extend_from_slice(&[0, 0, 1, 0, 1]);
+
     out
 }
 

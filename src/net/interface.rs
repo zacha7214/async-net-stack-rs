@@ -915,8 +915,7 @@ fn flush_front<D: Device>(device: &mut D, queue: &mut VecDeque<PacketBuf>) -> io
         result => result?,
     };
 
-    queue
-        .drain(..accepted);
+    queue.drain(..accepted);
     Ok(accepted)
 }
 

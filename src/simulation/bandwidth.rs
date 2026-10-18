@@ -63,13 +63,9 @@ impl<T> Serializer<T> {
 
     /// Cancel reservations without moving the deadlines of surviving packets.
     pub fn cancel(&mut self, mut matches: impl FnMut(&T) -> bool) {
-        self.pending
-            .retain(|r| !matches(&r.owner));
-        
-        self.stats.queued_bytes = self.pending
-            .iter()
-            .map(|r| r.bytes)
-            .sum();
+        self.pending.retain(|r| !matches(&r.owner));
+
+        self.stats.queued_bytes = self.pending.iter().map(|r| r.bytes).sum();
     }
 
     /// Reserve service and return arrival time, including propagation delay.
@@ -81,14 +77,13 @@ impl<T> Serializer<T> {
         propagation: Duration,
         owner: T,
     ) -> Result<Duration, AdmissionError> {
-        self
-            .advance(now);
-        
+        self.advance(now);
+
         let result = self.reserve(now, packet_bytes, propagation, owner);
         if result.is_err() {
             self.stats.dropped += 1;
         }
-        
+
         result
     }
 
@@ -102,42 +97,36 @@ impl<T> Serializer<T> {
         let bytes = packet_bytes
             .checked_add(self.config.overhead_bytes)
             .ok_or(AdmissionError::Overflow)?;
-        
+
         if bytes > self.config.queue_bytes - self.stats.queued_bytes {
             return Err(AdmissionError::Full);
         }
-        
+
         let numerator = bytes as u128 * 8 * 1_000_000_000;
         let rate = self.config.bits_per_second as u128;
         let ns = numerator.div_ceil(rate);
-        let seconds = u64::try_from(ns / 1_000_000_000)
-            .map_err(|_| AdmissionError::Overflow)?;
-        
+        let seconds = u64::try_from(ns / 1_000_000_000).map_err(|_| AdmissionError::Overflow)?;
+
         let service = Duration::new(seconds, (ns % 1_000_000_000) as u32);
-        let start = self
-            .pending
-            .back()
-            .map_or(now, |r| r.finish.max(now));
-        
+        let start = self.pending.back().map_or(now, |r| r.finish.max(now));
+
         let finish = start.checked_add(service).ok_or(AdmissionError::Overflow)?;
         let arrival = finish
             .checked_add(propagation)
             .ok_or(AdmissionError::Overflow)?;
-        
+
         self.pending.push_back(Reservation {
             finish,
             bytes,
             owner,
         });
-        
+
         self.stats.queued_bytes += bytes;
-        self.stats.peak_bytes = self.stats.peak_bytes
-            .max(self.stats.queued_bytes);
-        
+        self.stats.peak_bytes = self.stats.peak_bytes.max(self.stats.queued_bytes);
+
         self.stats.admitted += 1;
-        self.stats.max_queue_delay = self.stats.max_queue_delay
-            .max(start - now);
-        
+        self.stats.max_queue_delay = self.stats.max_queue_delay.max(start - now);
+
         Ok(arrival)
     }
 }

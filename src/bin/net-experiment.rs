@@ -99,8 +99,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // A report must never overwrite its capture or collection metadata.
         let absolute = if output.is_absolute() {
             output.clone()
-        } 
-        else {
+        } else {
             std::env::current_dir()?.join(&output)
         };
 
@@ -117,14 +116,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         file.write_all(b"\n")?;
         eprintln!("Report: {}", output.display());
-    } 
-    else {
+    } else {
         let stdout = io::stdout();
         let mut out = stdout.lock();
         serde_json::to_writer_pretty(&mut out, &result)?;
-        
-        out
-            .write_all(b"\n")?;
+
+        out.write_all(b"\n")?;
     }
 
     Ok(())

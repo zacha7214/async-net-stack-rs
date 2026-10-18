@@ -86,7 +86,7 @@ fn run() -> io::Result<()> {
         address: server_addr,
         id: 7,
     })?;
-    
+
     server.tcp.listen(server_addr)?;
 
     client.udp.discover(client_addr, server_addr, 7)?;

@@ -38,24 +38,15 @@ fn full_subscription_does_not_block_another_protocol() {
         tx_budget: 1,
     };
 
-    let mut udp = coordinator
-        .port(17, cfg).unwrap();
-    let mut custom = coordinator
-        .port(99, cfg).unwrap();
-    assert_eq!(
-        coordinator
-                   .poll(Duration::ZERO, 3).unwrap(),
-               3);
+    let mut udp = coordinator.port(17, cfg).unwrap();
+    let mut custom = coordinator.port(99, cfg).unwrap();
+    assert_eq!(coordinator.poll(Duration::ZERO, 3).unwrap(), 3);
     assert_eq!(udp.stats().queue_drops, 1);
 
     let mut rx = Vec::new();
-    assert_eq!(custom
-                   .recv(8, &mut rx).unwrap(),
-               1);
+    assert_eq!(custom.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(rx[0].as_slice()[28], 3);
-    assert_eq!(udp
-                   .recv(8, &mut rx).unwrap(),
-               1);
+    assert_eq!(udp.recv(8, &mut rx).unwrap(), 1);
     assert_eq!(rx[0].as_slice()[28], 1);
 }
 
@@ -67,30 +58,21 @@ fn budgets_preserve_unsent_suffix_and_renew_only_at_coordinator() {
         tx_budget: 1,
     };
 
-    let mut a = coordinator
-        .port(17,
-              cfg
-        ).unwrap();
-    let mut b = coordinator
-        .port(6,
-              cfg
-        ).unwrap();
-    coordinator
-        .poll(Duration::ZERO, 8).unwrap();
+    let mut a = coordinator.port(17, cfg).unwrap();
+    let mut b = coordinator.port(6, cfg).unwrap();
+    coordinator.poll(Duration::ZERO, 8).unwrap();
 
     let mut tx = vec![packet(&mut a, 1), packet(&mut a, 2)];
     assert_eq!(a.send(&mut tx).unwrap(), 1);
     assert!(tx[0].is_empty());
     assert_eq!(tx[1].as_slice()[28], 2);
-    a
-        .poll_at(Duration::ZERO).unwrap();
+    a.poll_at(Duration::ZERO).unwrap();
     assert_eq!(a.send(&mut tx[1..]).unwrap(), 0);
 
     let mut other = vec![packet(&mut b, 3)];
     assert_eq!(b.send(&mut other).unwrap(), 1);
 
-    coordinator
-        .poll(Duration::ZERO, 8).unwrap();
+    coordinator.poll(Duration::ZERO, 8).unwrap();
     assert_eq!(a.send(&mut tx[1..]).unwrap(), 1);
     assert_eq!(a.stats().submitted, 2);
 }
@@ -123,10 +105,7 @@ fn subscription_lifetime_and_clock_contract() {
     assert_eq!(port.queued(), 1);
     drop(port);
 
-    let mut replacement = coordinator
-        .port(17,
-              cfg
-        ).unwrap();
+    let mut replacement = coordinator.port(17, cfg).unwrap();
     assert_eq!(replacement.queued(), 0);
 
     // All buffers from the removed subscription are available again.
@@ -142,8 +121,7 @@ struct FailingDevice {
 
 impl Device for FailingDevice {
     fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> io::Result<usize> {
-        self.inner
-            .recv(max, out)
+        self.inner.recv(max, out)
     }
 
     fn send(&mut self, _: &mut [PacketBuf]) -> io::Result<usize> {
@@ -192,12 +170,10 @@ fn malformed_and_unclaimed_are_distinct() {
     let mut device = LoopbackDevice::new();
     let mut tx = vec![packet(&mut device, 1), packet(&mut device, 2)];
     tx[0].as_mut_packet()[0] = 0;
-    device
-        .send(&mut tx).unwrap();
+    device.send(&mut tx).unwrap();
 
     let mut coordinator = Coordinator::new(device);
-    coordinator
-        .poll(Duration::ZERO, 8).unwrap();
+    coordinator.poll(Duration::ZERO, 8).unwrap();
     assert_eq!(coordinator.stats().malformed, 1);
     assert_eq!(coordinator.stats().unclaimed, 1);
 }
@@ -213,12 +189,8 @@ fn simulated_dispatch_moves_the_original_packet_handle() {
     sender.send(&mut tx).unwrap();
 
     let mut coordinator = Coordinator::new(receiver);
-    let mut port = coordinator
-        .port(
-            17, PortConfig::default()
-        ).unwrap();
-    coordinator
-        .poll(Duration::ZERO, 4).unwrap();
+    let mut port = coordinator.port(17, PortConfig::default()).unwrap();
+    coordinator.poll(Duration::ZERO, 4).unwrap();
 
     let mut rx = Vec::new();
     port.recv(4, &mut rx).unwrap();

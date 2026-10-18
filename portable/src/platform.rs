@@ -34,11 +34,11 @@ pub mod io {
         pub fn other(message: &'static str) -> Self {
             Self::new(ErrorKind::Other, message)
         }
-        
+
         pub fn new(kind: ErrorKind, message: &'static str) -> Self {
             Self { kind, message }
         }
-        
+
         pub fn kind(&self) -> ErrorKind {
             self.kind
         }
@@ -49,7 +49,6 @@ pub mod io {
             f.write_str(self.message)
         }
     }
-    
 }
 
 pub(crate) fn default_sequence_source() -> io::Result<fn() -> io::Result<u32>> {

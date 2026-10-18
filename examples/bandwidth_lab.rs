@@ -11,25 +11,18 @@ fn main() -> io::Result<()> {
     for (rate, capacity) in [(1_000_000, 3000), (1_000_000, 6000), (10_000_000, 6000)] {
         run(rate, capacity)?;
     }
-    
+
     Ok(())
 }
 
 fn run(rate: u64, capacity: usize) -> io::Result<()> {
     let net = Network::default();
     let destination = Ipv4Addr::new(10, 0, 0, 3);
-    let mut receiver = net
-    .port(
-        &[destination], 16, 16
-    )?;
+    let mut receiver = net.port(&[destination], 16, 16)?;
 
     let mut senders = [
-        net.port(
-            &[Ipv4Addr::new(10, 0, 0, 1)], 8, 8
-    )?,
-        net.port(
-            &[Ipv4Addr::new(10, 0, 0, 2)], 8, 8
-        )?,
+        net.port(&[Ipv4Addr::new(10, 0, 0, 1)], 8, 8)?,
+        net.port(&[Ipv4Addr::new(10, 0, 0, 2)], 8, 8)?,
     ];
 
     let bottleneck = net.bottleneck(Bandwidth {
@@ -77,5 +70,4 @@ fn run(rate: u64, capacity: usize) -> io::Result<()> {
     );
 
     Ok(())
-
 }

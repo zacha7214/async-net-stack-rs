@@ -3,12 +3,7 @@ use async_net_stack_rs::{
     platform::io,
 };
 
-use std::{
-    cell::RefCell,
-    collections::VecDeque, 
-    rc::Rc, 
-    time::Duration
-};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Duration};
 
 #[derive(Default)]
 struct State {
@@ -36,17 +31,12 @@ unsafe impl RxDmaMemory for Memory {
         if std::mem::take(&mut s.fail_map) {
             return Err(io::Error::other("map rejected"));
         }
-        
+
         s.mapped += 1;
-        s.audit
-            .push("map");
-        
+        s.audit.push("map");
+
         let offset = p.data_offset();
-        Ok(p
-            .as_mut_slice()
-            .as_mut_ptr()
-            .add(offset)
-        )
+        Ok(p.as_mut_slice().as_mut_ptr().add(offset))
     }
 
     fn address(&self, p: &Self::Mapping) -> DmaAddress {
@@ -54,15 +44,11 @@ unsafe impl RxDmaMemory for Memory {
     }
 
     unsafe fn sync_for_device(&mut self, _: &mut Self::Mapping) {
-        self.0.borrow_mut()
-            .audit
-            .push("device");
+        self.0.borrow_mut().audit.push("device");
     }
 
     unsafe fn sync_for_cpu(&mut self, _: &mut Self::Mapping) {
-        self.0.borrow_mut()
-            .audit
-            .push("cpu");
+        self.0.borrow_mut().audit.push("cpu");
     }
 
     unsafe fn unmap(&mut self, _: Self::Mapping) {
@@ -80,41 +66,34 @@ unsafe impl RxEngine for Engine {
         if std::mem::take(&mut s.reject) {
             return Err(io::Error::other("post rejected"));
         }
-        
-        s.audit
-            .push("post");
-        s.posts
-            .push(p);
-        
+
+        s.audit.push("post");
+        s.posts.push(p);
+
         Ok(())
     }
-    
+
     fn completion(&mut self, _: Duration) -> Option<RxCompletion> {
         let mut s = self.0.borrow_mut();
         let completion_rx = s.completions.pop_front()?;
-        if let Some(i) = s.posts
-            .iter()
-            .position(|p| p.token == completion_rx.token) {
+        if let Some(i) = s.posts.iter().position(|p| p.token == completion_rx.token) {
             let post = s.posts.remove(i);
-            
+
             // Even malicious reported lengths cannot write outside the range.
             unsafe {
                 std::ptr::write_bytes(
                     post.address.0 as *mut u8,
-                    0x5a, 
-                    completion_rx.length
-                        .min(post.capacity)
+                    0x5a,
+                    completion_rx.length.min(post.capacity),
                 );
             }
         }
-        
-        s
-            .audit
-            .push("complete");
-        
+
+        s.audit.push("complete");
+
         Some(completion_rx)
     }
-    
+
     fn stop(&mut self) -> bool {
         let mut s = self.0.borrow_mut();
         if s.deny_stop {
@@ -124,7 +103,6 @@ unsafe impl RxEngine for Engine {
         s.posts.clear();
         true
     }
-
 }
 
 type Queue = RxQueue<Memory, Engine>;

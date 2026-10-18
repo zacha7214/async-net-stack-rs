@@ -13,21 +13,21 @@ pub struct UdpConfig {
     pub queue_capacity: usize,
     pub peer_capacity: usize,
     pub service_capacity: usize,
-    
+
     /// Bounds scheduling state, independently of discovered peers.
     pub max_tx_peers: usize,
     pub per_peer_capacity: usize,
     pub tx_budget: usize,
-    
+
     /// Packet round robin between destination IP:port pairs; FIFO within a peer.
     pub fair_queue: bool,
-    
+
     /// IPv4 bytes/sec, including IP/UDP headers. None disables pacing.
     /// Pacing is not adaptive congestion control. First packet may send immediately.
     pub bytes_per_second: Option<u64>,
     pub per_peer_bytes_per_second: Option<u64>,
     pub queue_lifetime: Option<Duration>,
-    
+
     /// Zero disables events; overflow overwrites oldest with a counter.
     pub event_capacity: usize,
 }
@@ -193,9 +193,7 @@ impl Scheduler {
                 .queue
                 .front()
                 .filter(|q| {
-                    !blocked
-                        .contains(&q.destination) 
-                        && self.peers[&q.destination].next <= now
+                    !blocked.contains(&q.destination) && self.peers[&q.destination].next <= now
                 })
                 .map(|_| 0);
         }
