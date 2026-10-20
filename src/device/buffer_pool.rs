@@ -17,8 +17,10 @@ struct PoolInner {
     frame_size: usize,
     num_frames: usize,
     layout: Option<Layout>,
+
     // Keeps an externally mapped arena alive, independently of its socket.
     _owner: Option<Rc<dyn Any>>,
+
     // Cell permits mutation through shared pool handles without aliasing &mut.
     free_list: Box<[Cell<usize>]>,
     free_count: Cell<usize>,
@@ -76,8 +78,7 @@ impl FramePool {
 
     /// # Safety
     /// `owner` must keep this initialized mapping valid; only this pool and
-    /// kernel-owned frames may access it. Each live frame has a single owner.
-    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    /// device-owned frames may access it. Each live frame has a single owner.
     pub(crate) unsafe fn from_owned_region(
         ptr: *mut u8,
         total: usize,
@@ -88,7 +89,6 @@ impl FramePool {
         Self::from_region(ptr, total, frame_size, num_frames, Some(owner))
     }
 
-    #[cfg(any(test, all(feature = "xdp", target_os = "linux")))]
     unsafe fn from_region(
         ptr: *mut u8,
         total: usize,
@@ -139,8 +139,8 @@ impl FramePool {
             #[cfg(debug_assertions)]
             self.mark_used(*dst, true);
         }
-
         self.0.free_count.set(count - n);
+
         n
     }
 
@@ -277,6 +277,7 @@ impl PacketBuf {
             headroom <= self.capacity - self.len,
             "headroom exceeds capacity"
         );
+
         self.data_offset = headroom;
     }
 
@@ -293,11 +294,13 @@ impl PacketBuf {
         assert!(bytes.len() <= self.data_offset, "headroom exhausted");
         self.data_offset -= bytes.len();
         self.len += bytes.len();
+
         self.as_mut_packet()[..bytes.len()].copy_from_slice(bytes);
     }
 
     pub fn pull_header(&mut self, n: usize) {
         assert!(n <= self.len);
+
         self.data_offset += n;
         self.len -= n;
     }
@@ -322,6 +325,7 @@ impl PacketBuf {
     pub fn tail_capacity(&self) -> usize {
         self.capacity - self.data_offset
     }
+
     pub fn recycle(self) {
         drop(self);
     }
@@ -366,8 +370,9 @@ impl fmt::Debug for PacketBuf {
     }
 }
 
-/// Heap-backed packet arena for portable device implementations. Allocation is
-/// supplied by the application's global allocator; exhaustion returns `None`.
+/// Packet arena for portable device implementations. `new` uses the global
+/// allocator; `from_owned_region` retains externally allocated storage. Frame
+/// exhaustion returns `None`.
 /// This storage is not automatically DMA-capable or cache coherent.
 #[derive(Clone)]
 pub struct PacketPool(FramePool);
@@ -377,15 +382,46 @@ impl PacketPool {
     pub fn new(frames: usize, frame_size: usize, alignment: usize) -> Self {
         Self(FramePool::new(frames, frame_size, alignment))
     }
+
+    /// Use an externally allocated, initialized arena without copying payloads.
+    /// All packet handles retain `owner`, including after this pool is dropped.
+    /// Metadata still uses the global allocator. Panics on invalid dimensions;
+    /// metadata allocation failure uses the global allocation-error handler.
+    ///
+    /// # Safety
+    /// `ptr` must identify one writable allocation of at least `total` initialized
+    /// bytes, with `total <= isize::MAX`. `owner` must keep that allocation stable
+    /// until its final reference is dropped. Transfer exclusive management of
+    /// the first `frames * frame_size` bytes to this pool: no other pool, CPU
+    /// reference or device may access them except through the packet ownership
+    /// protocol. DMA users must separately establish addressability, cache-line
+    /// isolation, synchronization and quiescence before recycling. This function
+    /// does not make ordinary memory DMA-capable. No raw frame IDs are exposed.
+    pub unsafe fn from_owned_region(
+        ptr: *mut u8,
+        total: usize,
+        frames: usize,
+        frame_size: usize,
+        owner: Rc<dyn Any>,
+    ) -> Self {
+        assert!(total <= isize::MAX as usize, "arena exceeds pointer range");
+        Self(FramePool::from_owned_region(
+            ptr, total, frame_size, frames, owner,
+        ))
+    }
+
     pub fn alloc(&self) -> Option<PacketBuf> {
         Some(self.0.packet_buf(self.0.alloc()?, 0))
     }
+
     pub fn alloc_batch(&self, max: usize, out: &mut Vec<PacketBuf>) -> usize {
         self.0.alloc_batch(max, out)
     }
+
     pub fn available(&self) -> usize {
         self.0.available()
     }
+
     pub fn frame_size(&self) -> usize {
         self.0.frame_size()
     }

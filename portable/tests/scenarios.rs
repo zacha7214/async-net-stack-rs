@@ -2,6 +2,7 @@
 extern crate async_net_stack_core as async_net_stack_rs;
 #[path = "../../tests/ap_lifecycle.rs"]
 mod ap_lifecycle;
+
 #[path = "../../tests/bandwidth.rs"]
 mod bandwidth;
 
@@ -42,7 +43,9 @@ fn packet_arena_ownership_survives_pool_drop() {
     assert!(pool.alloc().is_none());
 
     packet.set_len(3);
-    packet.as_mut_packet().copy_from_slice(b"abc");
+    packet
+    .as_mut_packet()
+    .copy_from_slice(b"abc");
 
     let retained = pool.clone();
     drop(pool);

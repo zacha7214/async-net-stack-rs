@@ -17,8 +17,10 @@
 use std::env;
 use std::error::Error as StdError;
 use std::io;
+
 #[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, Arc};
+use std::sync::atomic::{ AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 

@@ -52,7 +52,3 @@ required-features = ["tun"]
 [[example]]
 name = "xdp_vm_rx"
 required-features = ["xdp"]
-
-[workspace]
-members = ["baremetal/qemu-virt","portable"]
-resolver = "2"

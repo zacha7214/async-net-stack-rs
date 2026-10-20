@@ -35,4 +35,3 @@ SECTIONS {
     } > RAM
     /DISCARD/ : { *(.eh_frame*) *(.comment*) }
 }
-
