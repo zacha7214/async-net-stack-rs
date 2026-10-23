@@ -33,13 +33,20 @@ fn halt() -> ! {
 fn panic(info: &PanicInfo<'_>) -> ! {
     let mut uart = unsafe { board::console() };
     let _ = writeln!(uart, "PANIC: {info}");
+
     halt()
 }
 
 #[no_mangle]
 extern "C" fn exception_fatal(syndrome: u64, address: u64) -> ! {
-    let mut uart = unsafe { board::console() };
-    let _ = writeln!(uart, "EXCEPTION: ESR={syndrome:#x} ELR={address:#x}");
+    let mut uart = unsafe {
+        board::console()
+    };
+    let _ = writeln!(
+        uart,
+        "EXCEPTION: ESR={syndrome:#x} ELR={address:#x}"
+    );
+
     halt()
 }
 
@@ -59,15 +66,17 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
 
     // No DMA owner exists yet; the self-test returns every page.
     unsafe {
-        selftests::pages::<{ 
-            board::PAGE_POOL_WORDS 
+        selftests::pages::<{
+            board::PAGE_POOL_WORDS
         }>(&mut uart)
     };
 
     // CPU-side check only: caches are off, so the pool is coherent. Whether
     // GENET sees these as identity bus addresses is part of the driver work.
     let (cpu, bytes) = memory::page_pool_region();
-    let dma = unsafe { DmaAllocator::new(cpu, cpu.as_ptr() as usize, bytes) }.unwrap();
+    let dma = unsafe {
+        DmaAllocator::new(cpu, cpu.as_ptr() as usize, bytes)
+    }.unwrap();
     selftests::dma(&dma, &mut uart);
 
     writeln!(uart, "BOOT DONE: rpi4 runtime (no network driver yet)")
