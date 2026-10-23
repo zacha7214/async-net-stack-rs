@@ -1,0 +1,18 @@
+[package]
+name = "async-net-rpi4"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+publish = false
+license = "MIT"
+
+# Board crate: Raspberry Pi 4 (BCM2711) entry, addresses and layout. Runtime
+# bring-up only; no network driver yet. See docs/baremetal-layout.md.
+[dependencies]
+runtime = { package = "async-net-baremetal-runtime", path = "../runtime" }
+
+[[bin]]
+name = "rpi4-boot"
+path = "src/main.rs"
+test = false
+bench = false

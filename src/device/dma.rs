@@ -5,7 +5,7 @@ use crate::platform::io;
 use alloc::{collections::VecDeque, vec::Vec};
 use core::{mem, time::Duration};
 
-/// Device-visible address, not a CPU pointer or necessarily a physical address.
+/// Devices visible address, not necessarily a physical address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DmaAddress(pub u64);
 
@@ -129,7 +129,7 @@ struct Resources<M: DmaMemory, E: TxEngine> {
 ///
 /// If shutdown cannot prove quiescence, Drop quarantines (leaks) the entire
 /// resource bundle, including mappings, packets, mapper and engine. It never
-/// reuses DMA-visible memory based solely on elapsed time or a cancellation request.
+/// reuses DMA visible memory based solely on elapsed time or a cancellation request.
 pub struct TxQueue<M: DmaMemory, E: TxEngine> {
     resources: Option<Resources<M, E>>,
     pool: PacketPool,

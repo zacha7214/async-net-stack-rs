@@ -1,0 +1,12 @@
+# Bare-metal guests. Independent of the host workspace so guest panic and
+# linker settings never affect host tools. See docs/baremetal-layout.md.
+[workspace]
+members = ["runtime", "qemu-virt", "rpi4"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"
+debug = 2
+

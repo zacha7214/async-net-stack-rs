@@ -61,3 +61,19 @@ jobs:
       - run: cargo build --locked -p async-net-stack-core --target riscv64gc-unknown-none-elf
       - uses: dtolnay/rust-toolchain@1.77.0
       - run: cargo check --locked -p async-net-stack-core
+
+  qemu-virt-boot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-unknown-none-softfloat
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - run: cargo fmt --manifest-path baremetal/Cargo.toml --all -- --check
+      # Every board crate builds against the shared runtime; QEMU virt boots below.
+      - run: cargo clippy --locked --manifest-path baremetal/Cargo.toml --workspace --target aarch64-unknown-none-softfloat -- -D warnings
+      - run: python3 scripts/qemu-virt-net.py --smoke
+      - run: python3 scripts/qemu-virt-net.py --smoke --release
+

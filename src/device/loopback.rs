@@ -81,11 +81,13 @@ impl Device for LoopbackDevice {
     fn recv(&mut self, max: usize, out: &mut Vec<PacketBuf>) -> io::Result<usize> {
         out.clear();
         let slot_size = self.pool.frame_size();
+
         let n = max.min(self.rx.len());
 
         self.pool.alloc_batch(n, out);
         for buf in out.iter_mut() {
             let (slot, len) = self.rx.pop_front().expect("queue length checked");
+
             if len > buf.tail_capacity() {
                 buf.set_headroom(0);
             }
@@ -93,6 +95,7 @@ impl Device for LoopbackDevice {
             let base = slot * slot_size;
             let off = buf.data_offset();
             buf.as_mut_slice()[off..off + len].copy_from_slice(&self.arena[base..base + len]);
+
             buf.set_len(len);
             self.free_slots.push(slot);
         }
@@ -123,7 +126,9 @@ impl Device for LoopbackDevice {
 
             let base = slot * slot_size;
             self.arena[base..base + src.len()].copy_from_slice(src);
+
             self.rx.push_back((slot, src.len()));
+
             sent += 1;
         }
 

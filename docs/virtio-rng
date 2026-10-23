@@ -1,0 +1,217 @@
+# Virtio entropy and portable TCP sequence source (G)
+
+G is implemented in `baremetal/runtime/src/virtio/rng.rs`. It provides a bounded,
+polling entropy service and a callback for `TcpPool::with_sequence_source`. The
+QEMU runner supplies host entropy through virtio-rng. No global entropy singleton,
+Linux driver port, dependency, timestamp seed or deterministic fallback was added.
+
+The runtime remains single-core, MMU/caches off and no IOMMU. The source depends
+on the trusted host RNG backend; these tests establish transport, ownership and
+integration behavior, not the statistical or cryptographic quality of a device.
+
+## Shared transport and discovery
+
+`virtio/mmio.rs` now has one lifecycle implementation, `Transport<R, T, QUEUES>`,
+with typed constructors:
+
+| Transport | Device ID | Queues | Required / accepted features |
+| --- | --- | --- | --- |
+| `NetTransport<R, T>` | 1 | RX 0, TX 1 | VERSION_1 + MAC, optionally STATUS |
+| `RngTransport<R, T>` | 4 | request 0 | VERSION_1 only |
+
+Network methods and configuration access remain on the network specialization.
+Entropy does not read MAC, link status or device configuration fields. Each device
+retains its own register owner, queue storage and reset state. Sharing the
+allocator does not share reset authority. The fixed QEMU slot probe now selects
+by device kind, so either device may exist without the other.
+
+Both transports use the same feature negotiation, split-ring publication,
+completion validation, notification ordering and reset/quarantine behavior from
+B/C. There is no second copy of those algorithms. Existing network tests still
+exercise the shared implementation.
+
+The protocol basis is [Virtio 1.2, section 5.4](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html):
+entropy requests are writable buffers, and completion length determines how many
+bytes may be consumed. Short nonempty responses are valid. This implementation
+uses one direct writable descriptor and does not negotiate device-specific or
+optional ring features.
+
+## Ownership and fixed bounds
+
+The default service uses:
+
+- One descriptor in one split queue, backed by one 4 KiB DMA page.
+- One exclusively owned 4 KiB request region, exposing 256 bytes per request.
+- A 1024-byte CPU-only ring buffer for completed entropy, plus small heap metadata.
+
+Request and cache sizes are configurable up to 4096 bytes. Cache capacity must
+be at least the request size. Supporting a TCP sequence source additionally
+requires room for four bytes. General one-byte entropy consumers can use a
+smaller cache.
+
+The request region has exactly one owner: either the driver's idle `spare` slot
+or the transport's in-flight entry. No CPU slice is created while that region is
+owned by the device. Valid completion acquires DMA writes before returning the
+region, then copies only the reported bytes into the CPU cache. That small copy
+lets consumers read completed entropy while the device fills the same DMA region
+again. Completed data is never served directly from an active DMA buffer.
+
+The cache invariant is `cached bytes + reserved request bytes <= capacity`.
+Before posting, the service reserves space for a full response. Short replies
+release the unused reservation; they do not expose old bytes from a previous
+request. At most one request is in flight. There is no per-request allocation.
+
+`poll()` processes at most one completion and posts at most one new request.
+Even one-byte responses cannot create an unbounded refill loop. A full cache
+stops submissions until enough capacity is free for another whole request.
+Polling still checks device status while the cache is full. `pending()`,
+`available()`, `stats()` and `fault()` expose progress without exposing DMA memory.
+
+This owned-region path uses the caches-off DMA contract directly. No payload
+cache maintenance is needed in that domain; the shared ring supplies barriers.
+A future cache-enabled platform must add correct synchronization before using
+this implementation there.
+
+## Consumption, errors and shutdown
+
+`try_fill(out)` is all-or-nothing:
+
+| Situation | Result |
+| --- | --- |
+| Enough completed bytes | Fill `out`, consume each byte once |
+| Cache temporarily short | `WouldBlock`; destination and cache unchanged |
+| Request exceeds cache capacity | `InvalidInput`; destination unchanged |
+| Service stopped | `NotConnected`; destination unchanged |
+| Device/protocol fault | Error; no cached entropy is returned |
+
+The consumer path performs no MMIO, allocation, refill or wait. A busy shared
+borrow also returns `WouldBlock`. Refill is the main loop's responsibility.
+Consumed cache slots are cleared, and fault/shutdown discards cached bytes. This
+is ordinary memory clearing, not a guarantee of secure erasure of all copies.
+
+A zero-length completion violates the entropy protocol and latches a fault.
+Oversized lengths or corrupt ring metadata use the common transport fault path;
+the suspicious DMA owner remains retained. Detection of a device fault discards
+the CPU cache and stops further requests. There is no substitute entropy source.
+A missing completion simply leaves the request in flight; elapsed time does not
+authorize reuse.
+
+`VirtioRng` handles clone an `Rc<RefCell<...>>`, not the register/queue owner. This
+matches the single-threaded runtime and keeps it `!Send`/`!Sync`. A TCP callback
+retains the service, so dropping the main-loop handle alone does not release DMA
+memory while a callback survives. Keep a handle for polling and explicit shutdown.
+
+`shutdown()` is terminal for every clone/callback. It discards cached bytes,
+requests device reset and releases DMA storage only after confirmation. A failed
+reset can be retried and retains the outstanding request. Successful cancellation
+is counted once. Last-owner Drop performs the same transport reset, quarantining
+the active ring and request on failure. An idle request region is already
+quiescent and can be freed independently. For reinitialization, confirm shutdown
+and drop all old handles/callbacks before opening the device again.
+
+## TCP integration and backpressure
+
+After the service has at least four bytes available, wire it into the existing
+portable API:
+
+```rust
+let source = entropy.tcp_sequence_source()?;
+let mut tcp = TcpPool::with_sequence_source(device, tcp_config, source)?;
+```
+
+The source factory checks readiness without consuming bytes. It returns
+`WouldBlock` if entropy has not arrived, or `InvalidInput` if the configured cache
+can never hold four bytes. Propagating that result prevents construction of the
+TCP pool before entropy is available. The portable `TcpPool::new` still returns
+`Unsupported` because portable builds have no implicit OS entropy provider.
+
+Each callback invocation consumes four fresh cached bytes and converts them to
+a `u32`. The byte-order convention is explicit little endian; all values,
+including zero, are valid. The callback neither polls the device nor seeds a
+local PRNG. Readiness is not a reservation: another consumer can drain the cache
+between factory creation and a TCP open, so later callback errors remain possible.
+
+Main-loop integration is explicit: poll entropy with bounded work before network
+processing, and handle entropy errors according to application policy. An active
+`connect` that encounters `WouldBlock` creates no connection and consumes no ID;
+it can be retried after refill. During a passive open, `TcpPool::poll` can return
+`WouldBlock`, recycles the received SYN and creates no connection. After refill,
+a retransmitted SYN can be processed normally. Existing established connections
+do not need a fresh sequence number for every data packet. Missing entropy does
+not require shutting down UDP.
+
+The guest boot check obtains 4096 bytes over repeated refills, constructs a TCP
+pool using the real entropy callback, and checks that an active open consumes
+four bytes and reaches `SynSent`. That construction check uses `LoopbackDevice`;
+it does **not** claim a TCP handshake or stream exchange with the host. A synthetic
+peer test checks a real encoded SYN-ACK against known supplied entropy, including
+cache exhaustion and retry. End-to-end host TCP traffic is a separate harness
+extension.
+
+## Validation and commands
+
+```sh
+python3 scripts/qemu-virt-net.py                  # entropy + UDP, serial shown
+python3 scripts/qemu-virt-net.py --smoke
+python3 scripts/qemu-virt-net.py --smoke --release
+cargo test --locked --manifest-path baremetal/Cargo.toml -p async-net-baremetal-runtime
+cargo test --locked -p async-net-stack-core
+cargo fmt --all -- --check
+cargo fmt --manifest-path baremetal/Cargo.toml --all -- --check
+```
+
+The runtime suite has 56 tests: the existing 45 plus one entropy transport test
+and ten RNG/TCP tests. The new tests cover feature/queue isolation, short reads,
+cache wrap/capacity, unchanged output on error, absent/legacy devices, invalid
+configuration, setup allocation failure, no completion, zero/oversized responses,
+fault after publication, reset retry/quarantine, token exhaustion, shared-source
+lifetime, and active/passive TCP entropy exhaustion/recovery. Synthetic devices
+write the actual ring and published DMA ranges; deterministic bytes stay in tests.
+
+The runner uses explicit QEMU `rng-random` configuration with `/dev/urandom`,
+attached as `virtio-rng-device`. Entropy bytes are not printed. Full debug/release
+smoke covers:
+
+1. Modern NIC and RNG: repeated entropy refill, TCP source integration, 256 UDP
+   echoes across NIC reset, and continued RNG operation after each NIC reset.
+2. Rate-limited RNG (`max-bytes=3,period=1`): real short responses, checked by a
+   positive short-read counter, with the same entropy and UDP scenarios.
+3. No RNG: explicit TCP-unavailable diagnostic, with all UDP echoes still passing.
+4. No NIC: RNG discovery, operation and reset succeed independently.
+5. Legacy transports: unsupported-device diagnostics without modern setup.
+6. Heap allocation failure: the existing bounded panic/halt check.
+
+After these scenarios, RNG reset/reinitialization is checked and every DMA page
+must return. The boot-only readiness helper waits at most five seconds per
+readiness operation; normal packet processing never uses that helper. Host smoke
+retains its overall timeout and kills failed guests.
+
+Root `cargo fmt` covers the host and portable workspace. The guest's independent
+`[workspace]` means it needs the second formatting command above. Both checks now
+pass; the previously reported guest formatting differences have been fixed.
+
+## Remaining work and division
+
+A–D and G now work for this QEMU polling target. The next runtime package is
+**F: interrupts and race-free wakeups**. E remains useful parallel human work;
+physical hardware remains H.
+
+- **F / runtime:** choose and document the QEMU GIC version and IRQ routing;
+  implement resumable vectors with full required register preservation; bring up
+  the timer interrupt; route NIC and RNG notifications to pending-work flags.
+  Keep `Rc` pools, entropy consumption and transport mutation in the main loop.
+  Define queue notification enabling and a race-free check/enable/sleep sequence;
+  current split queues request suppressed interrupts. Run the same UDP/entropy
+  scenarios in polling and IRQ modes, including idle wakeups and reset.
+- **E / peer and integration:** add host TCP handshake/stream tests using this
+  source, concurrent TCP/UDP dispatch through the coordinator, failure/capture
+  artifacts, starvation/late-RNG recovery under connections, and packet fault
+  injection. The current TCP boot check verifies source use, not host delivery.
+- **H / platform:** device-tree discovery and reservations, MMU attributes,
+  coherent/noncoherent DMA cache maintenance, physical board/NIC selection and
+  hardware stress. Select a trusted entropy source for that board; virtio-rng
+  assumes a hypervisor-provided device and is not a physical TRNG driver.
+
+See the [broader work plan](virtio-net-plan.md) and the
+[network adapter design](virtio-net-adapter.md) for the other integration boundaries.
+

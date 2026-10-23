@@ -1,4 +1,10 @@
-//! Owned, contiguous DMA regions for the caches-off, no-IOMMU QEMU domain.
+//! Owned, contiguous DMA regions for a coherent, no-IOMMU domain.
+//!
+//! "Coherent" means CPU accesses to the region are observed by the device, and
+//! vice versa, without cache maintenance: caches/MMU off (QEMU virt today), a
+//! Normal Non-cacheable mapping, or hardware-coherent DMA. The board establishes
+//! this; `sync_*` are therefore no-ops here. A non-coherent board needs its own
+//! `DmaMemory` implementation with clean/invalidate by cache line.
 //! Mapping performs validation and retains storage; it never starts a device.
 use super::page::{PageAllocator, PageRun, PAGE_SIZE};
 use alloc::rc::Rc;
@@ -9,7 +15,6 @@ use async_net_stack_core::{
     },
     platform::io,
 };
-
 use core::{cell::RefCell, ptr::NonNull};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -32,7 +37,7 @@ impl DmaAllocator {
     /// Transfer exclusive ownership of this stable, writable CPU allocation for
     /// the lifetime of ALL allocator/region/packet/mapping handles (or forever
     /// if any are leaked). It must map contiguously to `device_start` in the
-    /// no-IOMMU device domain, with caches disabled throughout. Exclude kernel,
+    /// no-IOMMU device domain, coherent (see module docs) throughout. Exclude kernel,
     /// heap, stacks and firmware. CPU base and device base must be page aligned.
     /// On the host, use only with an inert test device, not physical DMA.
     pub unsafe fn new(cpu: NonNull<u8>, device_start: usize, bytes: usize) -> Result<Self, Error> {
@@ -86,9 +91,7 @@ impl DmaAllocator {
             .allocate(count, alignment_pages)
             .map_err(|_| Error::Exhausted)?;
         let offset = run.physical_start() - self.0.device_start;
-        let cpu = unsafe {
-            NonNull::new_unchecked(self.0.cpu.as_ptr().add(offset))
-        };
+        let cpu = unsafe { NonNull::new_unchecked(self.0.cpu.as_ptr().add(offset)) };
 
         // Both CPU and device alignment must hold, even in translated host tests.
         if cpu.as_ptr() as usize % alignment != 0 {
@@ -130,9 +133,7 @@ impl OwnedDmaRegion {
         DmaAddress(self.run.physical_start() as u64)
     }
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe {
-            core::slice::from_raw_parts_mut(self.cpu.as_ptr(), self.len())
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.cpu.as_ptr(), self.len()) }
     }
 
     pub fn into_packet_pool(
@@ -146,9 +147,9 @@ impl OwnedDmaRegion {
             || frame_size == 0
             || frame_size % 64 != 0
             || frames
-            .checked_mul(frame_size)
-            .filter(|&n| n <= self.len())
-            .is_none()
+                .checked_mul(frame_size)
+                .filter(|&n| n <= self.len())
+                .is_none()
         {
             return Err(Error::InvalidLayout);
         }
@@ -245,7 +246,7 @@ impl PacketDmaMemory {
     }
 }
 
-// This memory domain is explicitly caches-off for its entire lifetime. No cache
+// This memory domain is coherent for its entire lifetime. No cache
 // operation is required; ring/MMIO barriers belong to the future engine, not here.
 unsafe impl DmaMemory for PacketDmaMemory {
     type Mapping = Mapping;
@@ -273,7 +274,6 @@ unsafe impl RxDmaMemory for PacketDmaMemory {
         }
         let offset = packet.data_offset();
         let capacity = packet.tail_capacity();
-
         // Obtain writable provenance from the mutable whole-frame view; do not
         // derive a writable DMA address from an immutable packet slice.
         let ptr = unsafe { packet.as_mut_slice().as_mut_ptr().add(offset) };
@@ -291,8 +291,8 @@ unsafe impl RxDmaMemory for PacketDmaMemory {
 
 #[cfg(test)]
 mod tests {
-    use alloc::boxed::Box;
     use super::*;
+    use std::boxed::Box;
     #[repr(align(16384))]
     struct Storage([u8; 32768]);
 
@@ -303,7 +303,7 @@ mod tests {
                 0x4000_0000,
                 storage.0.len(),
             )
-                .unwrap()
+            .unwrap()
         }
     }
 
@@ -424,7 +424,7 @@ mod tests {
                 8192,
             )
         }
-            .is_err());
+        .is_err());
     }
 
     #[test]
@@ -467,9 +467,7 @@ mod tests {
 
         let stop = Rc::new(Cell::new(false));
         let mut queue =
-            unsafe {
-                TxQueue::new(pool, mapper, Held(stop.clone()), TxConfig::default())
-            }.unwrap();
+            unsafe { TxQueue::new(pool, mapper, Held(stop.clone()), TxConfig::default()) }.unwrap();
 
         let mut packets = [packet];
         assert_eq!(queue.send(&mut packets).unwrap(), 1);
@@ -486,3 +484,4 @@ mod tests {
         assert_eq!(allocator.free_pages(), 8);
     }
 }
+

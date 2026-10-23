@@ -3,4 +3,8 @@
 /results/
 .DS_Store
 __pycache__/
+
+/baremetal/target/
 /baremetal/qemu-virt/target/
+/docs/virtio-net-plan.md
+

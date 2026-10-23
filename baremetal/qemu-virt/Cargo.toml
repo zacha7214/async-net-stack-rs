@@ -6,11 +6,11 @@ rust-version = "1.77"
 publish = false
 license = "MIT"
 
-# Independent workspace: guest panic/boot settings must not affect host tools.
-[workspace]
-
+# Board crate: QEMU virt addresses, layout and the virtio regression scenario.
+# Profiles (panic = "abort") come from the baremetal workspace.
 [dependencies]
 async-net-stack-core = { path = "../../portable" }
+runtime = { package = "async-net-baremetal-runtime", path = "../runtime" }
 
 [[bin]]
 name = "net-boot"
@@ -21,8 +21,3 @@ bench = false
 [features]
 heap-oom-test = []
 
-[profile.dev]
-panic = "abort"
-[profile.release]
-panic = "abort"
-debug = 2

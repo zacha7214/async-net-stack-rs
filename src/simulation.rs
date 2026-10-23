@@ -79,9 +79,12 @@ impl State {
         for serializer in &mut self.bottlenecks {
             serializer.cancel(|&(source, target)| source == id || target == id);
         }
+
         for (target, port) in self.ports.iter_mut().enumerate() {
             let before = port.queue.len();
+
             port.queue.retain(|p| target != id && p.source != id);
+
             self.stats.disconnected_drops += (before - port.queue.len()) as u64;
         }
     }
@@ -89,17 +92,20 @@ impl State {
 
 #[derive(Clone, Default)]
 pub struct Network(Rc<RefCell<State>>);
+
 /// A shared FIFO bottleneck belonging to one fabric.
 #[derive(Clone)]
 pub struct Bottleneck {
     network: Network,
     id: usize,
 }
+
 impl Bottleneck {
     pub fn stats(&self) -> BandwidthStats {
         self.network.0.borrow().bottlenecks[self.id].stats()
     }
 }
+
 impl Network {
     /// Allocate a FIFO serializer; rate and byte capacity must both be nonzero.
     pub fn bottleneck(&self, config: Bandwidth) -> io::Result<Bottleneck> {
@@ -109,9 +115,11 @@ impl Network {
                 "bandwidth and byte capacity must be nonzero",
             )
         })?;
+
         let mut state = self.0.borrow_mut();
         let id = state.bottlenecks.len();
         state.bottlenecks.push(serializer);
+
         Ok(Bottleneck {
             network: self.clone(),
             id,
@@ -135,12 +143,14 @@ impl Network {
                 "foreign fabric handle",
             ));
         }
+
         let mut state = self.0.borrow_mut();
         if let Some(b) = bottleneck {
             state.shaping.insert((from.id, to.id), b.id);
         } else {
             state.shaping.remove(&(from.id, to.id));
         }
+
         Ok(())
     }
 
@@ -218,6 +228,7 @@ impl Network {
         for serializer in &mut state.bottlenecks {
             serializer.advance(now);
         }
+
         Ok(())
     }
 

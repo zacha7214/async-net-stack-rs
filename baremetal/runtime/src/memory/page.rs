@@ -1,3 +1,4 @@
+// Adapted from Zach Allen's bare-metal-utils; see docs/virtio-net-plan.md.
 //! Fixed-size bitmap allocator of 4 KiB physical frames, with contiguous runs.
 //!
 //! Does not dereference physical addresses, map pages, zero memory, or allocate
@@ -37,11 +38,9 @@ impl PageRun {
     pub fn physical_start(self) -> usize {
         self.start
     }
-
     pub fn page_count(self) -> usize {
         self.pages
     }
-
     pub fn byte_len(self) -> usize {
         self.pages * PAGE_SIZE
     }
@@ -66,16 +65,13 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
         if end <= start {
             return Err(InitError::EmptyOrReversed);
         }
-
         if start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
             return Err(InitError::Unaligned);
         }
-
         let pages = (end - start) / PAGE_SIZE;
         if pages.div_ceil(BITS) > WORDS {
             return Err(InitError::InsufficientMetadata);
         }
-
         Ok(Self {
             start,
             pages,
@@ -109,11 +105,9 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
         {
             return Err(AllocError::InvalidRequest);
         }
-
         if pages > self.free {
             return Err(AllocError::OutOfMemory);
         }
-
         let base_frame = self.start / PAGE_SIZE;
         let mut candidate = 0;
         while candidate <= self.pages - pages {
@@ -122,24 +116,19 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
             let Some(aligned) = candidate.checked_add(padding) else {
                 break;
             };
-
             candidate = aligned;
             if candidate > self.pages - pages {
                 break;
             }
-
             let end = candidate + pages;
-            if let Some(occupied) = (candidate..end)
-                .find(|&index| self.is_used(index)) {
+            if let Some(occupied) = (candidate..end).find(|&index| self.is_used(index)) {
                 // Any run beginning before this occupied frame would overlap it.
                 candidate = occupied + 1;
                 continue;
             }
-
             for index in candidate..end {
                 self.set_used(index, true);
             }
-
             self.free -= pages;
             return Ok(PageRun {
                 start: self.start + candidate * PAGE_SIZE,
@@ -163,7 +152,6 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
             .start
             .checked_sub(self.start)
             .ok_or(FreeError::OutsidePool)?;
-
         let first = offset / PAGE_SIZE;
         if offset % PAGE_SIZE != 0
             || run.pages == 0
@@ -172,16 +160,13 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
         {
             return Err(FreeError::OutsidePool);
         }
-
         let end = first + run.pages;
         if (first..end).any(|index| !self.is_used(index)) {
             return Err(FreeError::AlreadyFree);
         }
-
         for index in first..end {
             self.set_used(index, false);
         }
-
         self.free += run.pages;
         Ok(())
     }
@@ -194,8 +179,7 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
         let mask = 1_u64 << (index % BITS);
         if used {
             self.used[index / BITS] |= mask;
-        }
-        else {
+        } else {
             self.used[index / BITS] &= !mask;
         }
     }
@@ -204,3 +188,4 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
 #[cfg(test)]
 #[path = "page_tests.rs"]
 mod tests;
+

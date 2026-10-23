@@ -13,6 +13,7 @@ fn alloc_free_roundtrip_exhausts_and_reuses() {
     for _ in 0..4 {
         got.push(pool.alloc().unwrap());
     }
+
     assert!(pool.alloc().is_none(), "pool should be exhausted");
 
     // All four indices should be distinct.
@@ -26,11 +27,13 @@ fn alloc_free_roundtrip_exhausts_and_reuses() {
     pool.free(got[3]);
     let a = pool.alloc().unwrap();
     let b = pool.alloc().unwrap();
+
     let mut reuse = vec![a, b];
     reuse.sort_unstable();
 
     let mut expected = vec![got[1], got[3]];
     expected.sort_unstable();
+
     assert_eq!(reuse, expected);
     assert!(pool.alloc().is_none());
 }
@@ -72,6 +75,7 @@ fn explicit_recycle_and_drop_are_idempotent() {
 
     let buf = pool.packet_buf(idx2, 4);
     drop(buf); // Drop path
+
     let idx3 = pool.alloc().unwrap();
     assert_eq!(idx2, idx3);
 }
@@ -81,8 +85,10 @@ fn explicit_recycle_and_drop_are_idempotent() {
 fn debug_build_detects_double_free() {
     let pool = FramePool::new(1, 64, 4096);
     let idx = pool.alloc().unwrap();
+
     pool.free(idx);
-    pool.free(idx); // double free -> panic in debug builds
+    // double free -> panic in debug builds
+    pool.free(idx);
 }
 
 #[test]
@@ -149,9 +155,13 @@ fn push_and_pull_headers() {
     // Simulate receiving an Ethernet+IP+TCP frame from a backend.
     // Start with TCP payload.
     let payload = b"HTTP/1.1 200 OK\r\n";
-    buf.set_headroom(128); // reserve 128 bytes for headers
+
+    // reserve 128 bytes for headers
+    buf.set_headroom(128);
     let off = buf.data_offset();
+
     buf.as_mut_slice()[off..off + payload.len()].copy_from_slice(payload);
+
     buf.set_len(payload.len());
 
     // Now prepend headers as the packet moves up the stack.
@@ -501,4 +511,39 @@ fn loopback_frame_size_and_alloc() {
     assert_eq!(buf.len(), 0);
     assert_eq!(buf.capacity(), dev.frame_size());
     assert!(buf.data_offset() > 0, "headroom should be reserved");
+}
+
+#[test]
+fn external_packet_arena_retains_owner_until_last_packet() {
+    use crate::device::PacketPool;
+    use alloc::rc::Rc;
+    use core::cell::{Cell, UnsafeCell};
+    struct Arena {
+        bytes: UnsafeCell<[u8; 512]>,
+        dropped: Rc<Cell<bool>>,
+    }
+    impl Drop for Arena {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+    let dropped = Rc::new(Cell::new(false));
+    let arena = Rc::new(Arena {
+        bytes: UnsafeCell::new([0; 512]),
+        dropped: dropped.clone(),
+    });
+    let pointer = arena.bytes.get().cast::<u8>();
+    // Sole CPU management passes to the pool; the owner is moved, not retained
+    // for competing payload access. Packet metadata is independent of storage.
+    let pool = unsafe { PacketPool::from_owned_region(pointer, 512, 2, 256, arena) };
+    let mut packet = pool.alloc().unwrap();
+    packet.set_headroom(37);
+    packet.set_len(3);
+    packet.as_mut_packet().copy_from_slice(b"own");
+    assert_eq!(packet.as_slice().as_ptr(), unsafe { pointer.add(37) });
+    drop(pool);
+    assert!(!dropped.get());
+    assert_eq!(packet.as_slice(), b"own");
+    drop(packet);
+    assert!(dropped.get());
 }

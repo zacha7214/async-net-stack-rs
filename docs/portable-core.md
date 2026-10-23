@@ -72,11 +72,31 @@ RX now covers posted-buffer ownership, received-length validation, stale complet
 bounded delivery and quiescent shutdown, with shared host/portable tests.
 The following remain before hardware:
 
-1. Implement actual DMA allocation/mapping, cache maintenance, device barriers and
-   descriptor rings. Run the same ownership scenarios against that adapter
-2. Supply a board runtime: allocator, monotonic clock, entropy, panic handling,
-   polling/interrupt integration and NIC initialization.
+1. Validate platform-specific DMA mapping/cache maintenance and ownership on
+   physical hardware. The caches-off QEMU adapter now implements allocation,
+   barriers, rings and the same ownership scenarios.
+2. Complete interrupt integration, then board discovery/initialization
+   for physical hardware. QEMU already supplies heap, clock, panic handling,
+   polling, modern virtio-net initialization and virtio-rng entropy.
 
 Host DNS helpers, telemetry/JSON, capture ingestion and OS backends are still
 outside the portable package. This milestone isolates the packet-processing and
 experiment core; it does not make every host tool meaningful on bare metal.
+
+## QEMU runtime bring-up
+
+The `baremetal/qemu-virt` board now runs
+`UdpPool<EthernetIpv4<VirtioNet<Mmio>>>` over DMA-backed packet arenas, using the
+shared `baremetal/runtime` crate (see the [bare-metal layout](baremetal-layout.md)). Its runner
+verifies 256 host UDP echoes across reset, reusing received storage for replies.
+The runtime includes a reclaiming heap, monotonic clock, panic handling, modern
+MMIO initialization, split rings and bounded RX replenishment.
+
+Read the [adapter design and remaining work](virtio-net-adapter.md) for commands,
+ownership rationale, pool sizing and the polling/caches-off boundary. Earlier
+layers are documented in the [PacketPool rationale](dma-packet-pool.md),
+[MMIO notes](virtio-mmio.md) and [split-ring design](virtio-split-rings.md).
+The [entropy integration](virtio-rng.md) now supplies the explicit TCP sequence
+source without changing the portable API. The [work-sharing plan](virtio-net-plan.md)
+outlines remaining interrupt, discovery and physical-hardware packages.
+

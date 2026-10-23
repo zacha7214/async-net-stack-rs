@@ -263,8 +263,8 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
                 resource.memory.sync_for_cpu(&mut mapping);
                 resource.memory.unmap(mapping);
             }
-
             self.stats.posting_errors += 1;
+
             return Err(e);
         }
 
@@ -274,8 +274,8 @@ impl<M: RxDmaMemory, E: RxEngine> RxQueue<M, E> {
             mapping,
             packet: mem::take(frame),
         });
-
         self.stats.posted += 1;
+
         Ok(true)
     }
 
