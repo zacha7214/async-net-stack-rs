@@ -12,6 +12,6 @@ pub mod arch;
 pub mod memory;
 pub mod pl011;
 #[cfg(target_arch = "aarch64")]
-pub mod selftest;
+pub mod selftests;
 pub mod virtio;
 
