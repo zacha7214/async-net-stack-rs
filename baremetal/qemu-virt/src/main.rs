@@ -12,7 +12,7 @@ use runtime::{
     arch::aarch64::timer,
     memory::{self, dma::DmaAllocator, heap::LockedHeap},
     pl011::Uart,
-    selftest,
+    selftests,
     virtio::{
         mmio::Mmio,
         net::{Config as NetConfig, VirtioNet},
@@ -290,7 +290,7 @@ pub extern "C" fn kernel_main(_boot_arg: usize) -> ! {
 
     let (heap_start, heap_bytes) = memory::heap_region();
     assert!(unsafe { HEAP.init(heap_start, heap_bytes) });
-    selftest::heap(&HEAP, &mut uart);
+    selftests::heap(&HEAP, &mut uart);
 
     if cfg!(feature = "heap-oom-test") {
         // Exercise Rust's default no_std allocation-error path, which reaches
@@ -300,15 +300,21 @@ pub extern "C" fn kernel_main(_boot_arg: usize) -> ! {
         panic!("unexpected heap allocation success");
     }
 
-    selftest::clock(&mut uart);
-    // No DMA owner exists yet; the self-test returns every page.
-    unsafe { selftest::pages::<{ board::PAGE_POOL_WORDS }>(&mut uart) };
+    selftests::clock(&mut uart);
+    // No DMA owner exists at this point so the self-test returns every page.
+    unsafe {
+        selftests::pages::<{
+            board::PAGE_POOL_WORDS
+        }>(&mut uart)
+    };
 
     // Caches/MMU off: the pool is coherent and identity mapped for the device.
     let (cpu, bytes) = memory::page_pool_region();
-    let dma = unsafe { DmaAllocator::new(cpu, cpu.as_ptr() as usize, bytes) }.unwrap();
+    let dma = unsafe {
+        DmaAllocator::new(cpu, cpu.as_ptr() as usize, bytes)
+    }.unwrap();
     let original_free = dma.free_pages();
-    selftest::dma(&dma, &mut uart);
+    selftests::dma(&dma, &mut uart);
 
     let entropy = entropy_start(&dma, &mut uart);
     let network_baseline = dma.free_pages();

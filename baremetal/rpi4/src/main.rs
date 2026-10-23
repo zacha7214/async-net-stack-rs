@@ -12,7 +12,7 @@ extern crate alloc;
 use runtime::{
     memory::{self, dma::DmaAllocator, heap::LockedHeap},
     pl011::Uart,
-    selftest,
+    selftests,
 };
 
 // Real hardware caveat: with the MMU off, all data accesses are Device memory,
@@ -54,19 +54,21 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
 
     let (heap_start, heap_bytes) = memory::heap_region();
     assert!(unsafe { HEAP.init(heap_start, heap_bytes) });
-    selftest::heap(&HEAP, &mut uart);
-    selftest::clock(&mut uart);
+    selftests::heap(&HEAP, &mut uart);
+    selftests::clock(&mut uart);
 
     // No DMA owner exists yet; the self-test returns every page.
     unsafe {
-        selftest::pages::<{ board::PAGE_POOL_WORDS }>(&mut uart)
+        selftests::pages::<{ 
+            board::PAGE_POOL_WORDS 
+        }>(&mut uart)
     };
 
     // CPU-side check only: caches are off, so the pool is coherent. Whether
     // GENET sees these as identity bus addresses is part of the driver work.
     let (cpu, bytes) = memory::page_pool_region();
     let dma = unsafe { DmaAllocator::new(cpu, cpu.as_ptr() as usize, bytes) }.unwrap();
-    selftest::dma(&dma, &mut uart);
+    selftests::dma(&dma, &mut uart);
 
     writeln!(uart, "BOOT DONE: rpi4 runtime (no network driver yet)")
         .unwrap();
