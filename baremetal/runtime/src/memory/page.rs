@@ -65,13 +65,16 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
         if end <= start {
             return Err(InitError::EmptyOrReversed);
         }
+        
         if start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 {
             return Err(InitError::Unaligned);
         }
+        
         let pages = (end - start) / PAGE_SIZE;
         if pages.div_ceil(BITS) > WORDS {
             return Err(InitError::InsufficientMetadata);
         }
+        
         Ok(Self {
             start,
             pages,
@@ -88,7 +91,8 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
     }
 
     pub fn allocate_page(&mut self) -> Result<PageRun, AllocError> {
-        self.allocate(1, 1)
+        self
+            .allocate(1, 1)
     }
 
     /// Allocate physically contiguous frames. Alignment is a power of two in
@@ -152,6 +156,7 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
             .start
             .checked_sub(self.start)
             .ok_or(FreeError::OutsidePool)?;
+        
         let first = offset / PAGE_SIZE;
         if offset % PAGE_SIZE != 0
             || run.pages == 0
@@ -160,10 +165,12 @@ impl<const WORDS: usize> PageAllocator<WORDS> {
         {
             return Err(FreeError::OutsidePool);
         }
+        
         let end = first + run.pages;
         if (first..end).any(|index| !self.is_used(index)) {
             return Err(FreeError::AlreadyFree);
         }
+        
         for index in first..end {
             self.set_used(index, false);
         }

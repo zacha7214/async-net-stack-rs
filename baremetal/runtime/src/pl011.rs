@@ -53,11 +53,13 @@ impl Uart {
         uart.write(CR, 0);
         uart.write(IMSC, 0);
         uart.write(ICR, 0x7ff);
+        
         let (integer, fraction) = config.divisors();
         uart.write(IBRD, integer);
         uart.write(FBRD, fraction);
         uart.write(LCR_H, (3 << 5) | (1 << 4)); // 8-bit words, FIFO enabled.
         uart.write(CR, 1 | (1 << 8) | (1 << 9)); // UART, TX and RX enabled.
+        
         uart
     }
 
@@ -77,7 +79,9 @@ impl Uart {
         while self.read(FR) & (1 << 5) != 0 {
             core::hint::spin_loop();
         }
-        self.write(DR, u32::from(byte));
+        
+        self
+            .write(DR, u32::from(byte));
     }
 }
 

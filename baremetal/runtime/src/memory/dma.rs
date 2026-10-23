@@ -60,7 +60,8 @@ impl DmaAllocator {
         let pages =
             unsafe { PageAllocator::new(device_start, end) }.map_err(|_| Error::InvalidRegion)?;
 
-        Ok(Self(Rc::new(AllocatorInner {
+        Ok(Self(
+            Rc::new(AllocatorInner {
             cpu,
             device_start,
             pages: RefCell::new(pages),
@@ -96,7 +97,10 @@ impl DmaAllocator {
         // Both CPU and device alignment must hold, even in translated host tests.
         if cpu.as_ptr() as usize % alignment != 0 {
             unsafe {
-                self.0.pages.borrow_mut().release(run).unwrap();
+                self.0.pages
+                    .borrow_mut()
+                    .release(run)
+                    .unwrap();
             }
 
             return Err(Error::InvalidLayout);
@@ -218,7 +222,9 @@ impl PacketDmaMemory {
             .checked_sub(self.region.cpu.as_ptr() as usize)
             .ok_or_else(invalid)?;
 
-        let end = offset.checked_add(length).ok_or_else(invalid)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(invalid)?;
         if end > self.region.len() {
             return Err(invalid());
         }
@@ -265,6 +271,7 @@ unsafe impl DmaMemory for PacketDmaMemory {
 
 unsafe impl RxDmaMemory for PacketDmaMemory {
     type Mapping = Mapping;
+
     unsafe fn map(&mut self, packet: &mut PacketBuf) -> io::Result<Mapping> {
         if !packet.is_empty() {
             return Err(io::Error::new(
@@ -272,11 +279,19 @@ unsafe impl RxDmaMemory for PacketDmaMemory {
                 "RX packet must be empty",
             ));
         }
+
         let offset = packet.data_offset();
         let capacity = packet.tail_capacity();
+
         // Obtain writable provenance from the mutable whole-frame view; do not
         // derive a writable DMA address from an immutable packet slice.
-        let ptr = unsafe { packet.as_mut_slice().as_mut_ptr().add(offset) };
+        let ptr = unsafe {
+            packet
+                .as_mut_slice()
+                .as_mut_ptr()
+                .add(offset)
+        };
+
         self.map_range(ptr, capacity)
     }
 
@@ -336,14 +351,29 @@ mod tests {
     fn packet_and_mapping_retain_arena_without_copying() {
         let mut storage = Box::new(Storage([0; 32768]));
         let allocator = allocator(&mut storage);
-        let region = allocator.allocate(4096, 4096).unwrap();
+
+        let region = allocator
+            .allocate(4096, 4096)
+            .unwrap();
+
         let original = region.cpu.as_ptr();
-        let (pool, mut mapper) = region.into_packet_pool(2, 2048).unwrap();
-        let mut packet = pool.alloc().unwrap();
+        let (pool,
+            mut mapper) = region
+            .into_packet_pool(2, 2048)
+            .unwrap();
+        let mut packet = pool
+            .alloc()
+            .unwrap();
+
         packet.set_headroom(71);
         packet.set_len(3);
-        packet.as_mut_packet().copy_from_slice(b"dma");
-        assert_eq!(packet.as_slice().as_ptr(), unsafe { original.add(71) });
+        packet
+            .as_mut_packet()
+            .copy_from_slice(b"dma");
+        assert_eq!(
+            packet.as_slice().as_ptr(),
+            unsafe { original.add(71) }
+        );
 
         let map = unsafe { DmaMemory::map(&mut mapper, &packet) }.unwrap();
         assert_eq!(

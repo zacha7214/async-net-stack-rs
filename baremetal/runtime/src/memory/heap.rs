@@ -152,7 +152,13 @@ unsafe impl<const WORDS: usize> GlobalAlloc for LockedHeap<WORDS> {
         self.with(|heap| heap.allocate(layout))
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        self.with(|heap| unsafe { heap.release(pointer, layout) });
+        self
+            .with(
+                |heap| 
+                unsafe { 
+                heap
+                    .release(pointer, layout) 
+            });
     }
 }
 
@@ -162,12 +168,15 @@ mod tests {
     use std::{boxed::Box, vec::Vec};
     #[repr(align(4096))]
     struct Storage([u8; 16384]);
+    
     #[test]
     fn alignment_exhaustion_fragmentation_and_reuse() {
         let mut storage = Box::new(Storage([0; 16384]));
         let mut heap = Heap::<4>::empty();
+        
         assert!(unsafe { heap.init(storage.0.as_mut_ptr(), 16384) });
         assert!(!unsafe { heap.init(storage.0.as_mut_ptr(), 16384) });
+        
         let mut live = Vec::new();
         for (size, align) in [(1, 1), (65, 128), (100, 4096), (7000, 64)] {
             let layout = Layout::from_size_align(size, align).unwrap();
