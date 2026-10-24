@@ -78,7 +78,9 @@ fn udp_smoke(
 
     // Previous rounds confirm shared reset and drop all owners before re-opening.
     let registers = unsafe { Mmio::new(base) };
-    let net = unsafe { VirtioNet::new(registers, dma.clone(), NetConfig::default()) }.unwrap();
+    let net = unsafe { 
+        VirtioNet::new(registers, dma.clone(), NetConfig::default()) 
+    }.unwrap();
     let config = net.net_config();
     assert_eq!(net.queue_sizes(), [Some(64), Some(64)]);
     writeln!(
@@ -99,19 +101,29 @@ fn udp_smoke(
         config.link_up
     )
     .unwrap();
+    
     let address = Ipv4Addr::new(10, 0, 2, 15);
     let mut interface =
         EthernetIpv4::new(net, InterfaceConfig::new(address, 24, config.mac))
             .unwrap();
 
-    interface.set_gateway(Ipv4Addr::new(10, 0, 2, 2)).unwrap();
-    let mut stack = UdpPool::new(interface, 64, 8).unwrap();
+    interface
+        .set_gateway(
+            Ipv4Addr::new(10, 0, 2, 2)
+        ).unwrap();
+    let mut stack = UdpPool::new(
+        interface, 
+        64, 
+        8
+    ).unwrap();
+    
     stack
         .bind(Service {
             address: SocketAddrV4::new(address, 9000),
             id: 1,
         })
         .unwrap();
+    
     writeln!(uart, "NET READY: round={round} UDP=10.0.2.15:9000")
         .unwrap();
 
@@ -120,14 +132,16 @@ fn udp_smoke(
     let mut done = false;
     let mut datagrams = 0;
     loop {
-        let elapsed = timer::ticks().wrapping_sub(start);
+        let elapsed = timer::ticks()
+            .wrapping_sub(start);
         let now = Duration::new(
             elapsed / hz,
             ((elapsed % hz) as u128 * 1_000_000_000 / hz as u128) as u32,
         );
 
         if let Some(rng) = entropy {
-            rng.poll().unwrap();
+            rng.poll()
+                .unwrap();
         }
 
         stack
@@ -142,6 +156,7 @@ fn udp_smoke(
                 Action::Echo
             })
             .unwrap();
+        
         if done
             && stack.pending() == 0
             && stack.device_mut().pending() == 0
@@ -174,7 +189,9 @@ fn udp_smoke(
     writeln!(uart, "PASS UDP: round={round}; datagrams={datagrams}; TX={} RX={} replenished={}; portable ARP/IPv4/UDP echo",
         stats.tx_completed, stats.rx_completed, stats.rx_posted).unwrap();
 
-    net.shutdown().unwrap();
+    net
+        .shutdown()
+        .unwrap();
     assert!(net.stats().rx_cancelled > 0);
     // Stack-owned packets, pools and rings all drop before the caller checks RAM.
 }
@@ -283,10 +300,15 @@ fn entropy_start(dma: &DmaAllocator, uart: &mut Uart) -> Option<(usize, VirtioRn
 }
 
 #[no_mangle]
-pub extern "C" fn kernel_main(_boot_arg: usize) -> ! {
+pub unsafe extern "C" fn kernel_main(_boot_arg: usize) -> ! {
     // Startup and the checked-in runner establish the fixed board contract.
-    let mut uart = unsafe { Uart::new(board::UART0) };
-    writeln!(uart, "net-boot: EL1, one CPU, polling, caches/MMU off").unwrap();
+    let mut uart = unsafe { 
+        Uart::new(board::UART0)
+    };
+    writeln!(
+        uart, 
+        "net-boot: EL1, one CPU, polling, caches/MMU off"
+    ).unwrap();
 
     let (heap_start, heap_bytes) = memory::heap_region();
     assert!(unsafe { HEAP.init(heap_start, heap_bytes) });
@@ -313,11 +335,13 @@ pub extern "C" fn kernel_main(_boot_arg: usize) -> ! {
     let dma = unsafe {
         DmaAllocator::new(cpu, cpu.as_ptr() as usize, bytes)
     }.unwrap();
+    
     let original_free = dma.free_pages();
     selftests::dma(&dma, &mut uart);
 
     let entropy = entropy_start(&dma, &mut uart);
     let network_baseline = dma.free_pages();
+    
     match unsafe { probe::find(board::VIRTIO_MMIO, probe::Kind::Network) } {
         Some(device) if device.version == 2 => {
             writeln!(uart, "PASS virtio-net: modern MMIO at {:#x}", device.base).unwrap();
@@ -329,16 +353,19 @@ pub extern "C" fn kernel_main(_boot_arg: usize) -> ! {
                     round,
                     entropy.as_ref().map(|(_, rng)| rng),
                 );
-
                 assert_eq!(dma.free_pages(), network_baseline);
+                
                 if let Some((_, rng)) = &entropy {
                     wait_for_entropy(rng, 4);
                     rng
                         .try_fill(&mut [0; 4])
                         .unwrap();
-                    writeln!(uart, "PASS entropy isolation: NIC reset round={round}")
+                    writeln!(
+                        uart,
+                        "PASS entropy isolation: NIC reset round={round}")
                         .unwrap();
                 }
+                
                 writeln!(
                     uart,
                     "PASS MMIO reset: round={round}; rings and packet/header arenas reclaimed"
@@ -358,21 +385,33 @@ pub extern "C" fn kernel_main(_boot_arg: usize) -> ! {
         // Re-open the same device only after confirmed reset and all handles drop.
         let rng =
             unsafe {
-                VirtioRng::new(Mmio::new(base), dma.clone(), RngConfig::default())
+                VirtioRng::new(
+                    Mmio::new(base),
+                    dma.clone(), 
+                    RngConfig::default()
+                )
             }.unwrap();
 
         wait_for_entropy(&rng, 4);
-        rng.try_fill(&mut [0; 4]).unwrap();
-        rng.shutdown().unwrap();
+        rng
+            .try_fill(&mut [0; 4])
+            .unwrap();
+        rng
+            .shutdown()
+            .unwrap();
+        
         drop(rng);
         assert_eq!(dma.free_pages(), original_free);
         writeln!(
             uart,
             "PASS entropy reset: reinitialized; all DMA pages reclaimed"
-        )
-        .unwrap();
+        ).unwrap();
     }
-    writeln!(uart, "BOOT DONE: portable UDP smoke complete when present").unwrap();
+    
+    writeln!(
+        uart, 
+        "BOOT DONE: portable UDP smoke complete when present"
+    ).unwrap();
 
     halt()
 }

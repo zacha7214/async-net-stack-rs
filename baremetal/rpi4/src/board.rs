@@ -18,5 +18,7 @@ pub const PAGE_POOL_WORDS: usize = 16;
 /// # Safety
 /// Single CPU with interrupts masked; any previous UART owner never resumes.
 pub unsafe fn console() -> pl011::Uart {
-    unsafe { pl011::Uart::new(UART0) }
+    unsafe {
+        pl011::Uart::new(UART0)
+    }
 }

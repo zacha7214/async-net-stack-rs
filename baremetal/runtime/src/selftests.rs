@@ -21,7 +21,7 @@ use core::{
 /// Exercise the global allocator, including alignment and full reuse.
 /// Run immediately after `heap` was initialized over `memory::heap_region()`
 /// and installed as `#[global_allocator]`, before anything else allocates.
-pub fn heap<const WORDS: usize>(heap: &LockedHeap<WORDS>, out: &mut impl Write) {
+pub unsafe fn heap<const WORDS: usize>(heap: &LockedHeap<WORDS>, out: &mut impl Write) {
     let (heap_start, heap_bytes) = memory::heap_region();
     for _ in 0..16 {
         let data: alloc::vec::Vec<u64> = (0..512).collect();

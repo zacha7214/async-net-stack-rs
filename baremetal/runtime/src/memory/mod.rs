@@ -20,16 +20,18 @@ mod linked {
 
     /// Start and length of the linker-reserved heap. Only addresses are
     /// computed; ownership is granted by `LockedHeap::init`.
-    pub fn heap_region() -> (*mut u8, usize) {
+    pub unsafe fn heap_region() -> (*mut u8, usize) {
         let start = core::ptr::addr_of_mut!(__heap_start);
         let end = core::ptr::addr_of!(__heap_end) as usize;
+        
         (start, end - start as usize)
     }
 
     /// Start and length of the linker-reserved, page-aligned physical pool.
-    pub fn page_pool_region() -> (NonNull<u8>, usize) {
+    pub unsafe fn page_pool_region() -> (NonNull<u8>, usize) {
         let start = core::ptr::addr_of_mut!(__page_pool_start);
         let end = core::ptr::addr_of!(__page_pool_end) as usize;
+        
         (NonNull::new(start).unwrap(), end - start as usize)
     }
 
@@ -44,8 +46,11 @@ mod linked {
     {
         let (start, bytes) = page_pool_region();
         let start = start.as_ptr() as usize;
+        
         // SAFETY: Caller grants exclusive ownership of the linker-reserved region.
-        unsafe { PageAllocator::new(start, start + bytes) }
+        unsafe {
+            PageAllocator::new(start, start + bytes)
+        }
     }
 }
 
